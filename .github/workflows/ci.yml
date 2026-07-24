@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.7"
+      - name: Check formatting
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Recurse -Filter *.go | ForEach-Object { $_.FullName }
+          $unformatted = gofmt -l $files
+          if ($unformatted) { $unformatted; exit 1 }
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go build ./cmd/collab
+
+  ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.7"
+      - name: Check formatting
+        run: test -z "$(find . -name '*.go' -type f -print0 | xargs -0 gofmt -l)"
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: go build ./cmd/collab

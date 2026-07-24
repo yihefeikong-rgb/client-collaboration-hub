@@ -1,4 +1,4 @@
-module github.com/huangxinyang/client-collaboration-hub
+module github.com/yihefeikong-rgb/client-collaboration-hub
 
 go 1.25.7
 

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
-	"github.com/huangxinyang/client-collaboration-hub/internal/protocol"
+	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/protocol"
 )
 
 type Lock interface {

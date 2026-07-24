@@ -108,8 +108,11 @@ MVP 保留 JSONL。成功写入顺序为：验证输入和引用 → 追加一�
 
 YAML 以 `yaml.v3` 的 `KnownFields(true)` 解码，并在模型级 `Validate()` 中拒绝未知
 字段、重复 key、多文档、缺失字段、非法 ID/枚举、非 UTC RFC 3339 时间、路径与文件 ID
-不一致、绝对路径，以及 PID、PTY、session ID 或疑似凭据字段。任务还必须验证项目和
-客户端引用存在。
+不一致、受支持前缀的本地文件系统路径，以及 PID、PTY、session ID 或疑似凭据字段。
+受支持的 Unix 本地路径前缀为 `/home/`、`/Users/`、`/root/`、`/tmp/`、`/var/`、`/etc/`、
+`/opt/`、`/usr/`、`/mnt/`、`/srv/` 与 `/workspace/`；Windows 盘符、UNC、`~/` 与
+`file://` 也被拒绝。逻辑路由如 `/health` 与 `/api/v1/tasks` 不是本地路径。任务还必须
+验证项目和客户端引用存在。
 
 ## 客户端适配器
 

@@ -3,6 +3,7 @@ package protocol
 import (
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -40,7 +41,7 @@ func (p Project) Validate(expectedID string) error {
 	if err := validateID("project id", p.ID, expectedID); err != nil {
 		return err
 	}
-	if p.Name == "" {
+	if strings.TrimSpace(p.Name) == "" {
 		return fmt.Errorf("project name is required")
 	}
 	return validateUTCTime("project created_at", p.CreatedAt)
@@ -50,7 +51,7 @@ func (c Client) Validate(expectedID string) error {
 	if err := validateID("client id", c.ID, expectedID); err != nil {
 		return err
 	}
-	if c.Name == "" {
+	if strings.TrimSpace(c.Name) == "" {
 		return fmt.Errorf("client name is required")
 	}
 	if len(c.Capabilities) == 0 {
@@ -82,11 +83,11 @@ func (t Task) Validate(expectedID string, refs References) error {
 	if err := validateID("project_id", t.ProjectID, ""); err != nil {
 		return err
 	}
-	if t.Title == "" || t.Objective == "" || len(t.Acceptance) == 0 {
+	if strings.TrimSpace(t.Title) == "" || strings.TrimSpace(t.Objective) == "" || len(t.Acceptance) == 0 {
 		return fmt.Errorf("title, objective, and acceptance are required")
 	}
 	for _, criterion := range t.Acceptance {
-		if criterion == "" {
+		if strings.TrimSpace(criterion) == "" {
 			return fmt.Errorf("acceptance must not contain empty values")
 		}
 	}

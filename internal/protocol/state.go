@@ -106,6 +106,9 @@ func Transition(state State, task Task, request TransitionRequest) (State, error
 	if err := validateUTCTime("transition time", request.At); err != nil {
 		return State{}, err
 	}
+	if request.At.Before(state.UpdatedAt) {
+		return State{}, fmt.Errorf("transition time must not be before state updated_at")
+	}
 	if err := validateEvidenceKinds(request.EvidenceKinds); err != nil {
 		return State{}, err
 	}
@@ -181,7 +184,7 @@ func hasEvidence(kinds []EvidenceKind, wanted EvidenceKind) bool {
 }
 
 func isAllowedResponsible(client string, task Task, assigned string) bool {
-	return client == task.Creator || client == task.Reviewer || client == assigned
+	return client == task.Reviewer || client == assigned
 }
 
 func isBusinessStatus(status Status) bool {

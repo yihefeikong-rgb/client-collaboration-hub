@@ -101,6 +101,36 @@ func TestTransitionReassignsBlockedTask(t *testing.T) {
 	}
 }
 
+func TestBlockedStateAllowsOnlyAssignedOrReviewerResponsibility(t *testing.T) {
+	task := Task{ID: "T-0001", Creator: "creator", Reviewer: "reviewer"}
+	for _, responsible := range []string{"cc-haha", "reviewer"} {
+		state := State{TaskID: task.ID, Status: Blocked, AssignedClient: "cc-haha", ResponsibleClient: responsible, UpdatedAt: transitionTime}
+		if err := state.Validate(task); err != nil {
+			t.Fatalf("responsible_client %q rejected: %v", responsible, err)
+		}
+	}
+	for _, responsible := range []string{"creator", "other"} {
+		state := State{TaskID: task.ID, Status: Blocked, AssignedClient: "cc-haha", ResponsibleClient: responsible, UpdatedAt: transitionTime}
+		if err := state.Validate(task); err == nil {
+			t.Fatalf("responsible_client %q accepted", responsible)
+		}
+	}
+}
+
+func TestTransitionRejectsTimeRegression(t *testing.T) {
+	task := Task{ID: "T-0001", Creator: "codex", Reviewer: "codex"}
+	state := activeState(task, Working)
+	if _, err := Transition(state, task, TransitionRequest{Action: Submit, Actor: "cc-haha", EvidenceKinds: []EvidenceKind{EvidenceDiff, EvidenceTest}, At: transitionTime.Add(-time.Second)}); err == nil {
+		t.Fatal("earlier transition time accepted")
+	}
+	if _, err := Transition(state, task, TransitionRequest{Action: Submit, Actor: "cc-haha", EvidenceKinds: []EvidenceKind{EvidenceDiff, EvidenceTest}, At: transitionTime}); err != nil {
+		t.Fatalf("equal transition time rejected: %v", err)
+	}
+	if _, err := Transition(state, task, TransitionRequest{Action: Submit, Actor: "cc-haha", EvidenceKinds: []EvidenceKind{EvidenceDiff, EvidenceTest}, At: transitionTime.Add(time.Second)}); err != nil {
+		t.Fatalf("later transition time rejected: %v", err)
+	}
+}
+
 func activeState(task Task, status Status) State {
 	responsible := "cc-haha"
 	if status == Review || status == Done {

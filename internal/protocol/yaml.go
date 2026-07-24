@@ -95,7 +95,7 @@ func inspectNode(node *yaml.Node) error {
 		}
 		return nil
 	}
-	if node.Kind == yaml.ScalarNode && (absolutePathPattern.MatchString(node.Value) || unixHomePath(node.Value)) {
+	if node.Kind == yaml.ScalarNode && isLocalFilesystemPath(node.Value) {
 		return fmt.Errorf("absolute paths are forbidden in transferable yaml")
 	}
 	for _, child := range node.Content {
@@ -115,6 +115,14 @@ func forbiddenKey(key string) bool {
 	return forbidden
 }
 
-func unixHomePath(value string) bool {
-	return strings.HasPrefix(value, "/home/") || strings.HasPrefix(value, "/Users/")
+func isLocalFilesystemPath(value string) bool {
+	if absolutePathPattern.MatchString(value) || strings.HasPrefix(value, "~/") || strings.HasPrefix(value, "file://") {
+		return true
+	}
+	for _, prefix := range []string{"/home/", "/Users/", "/root/", "/tmp/", "/var/", "/etc/", "/opt/", "/usr/", "/mnt/", "/srv/", "/workspace/"} {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
 }

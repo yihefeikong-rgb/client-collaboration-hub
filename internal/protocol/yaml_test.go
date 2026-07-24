@@ -51,7 +51,6 @@ func TestDecodeTaskRejectsUnsafeOrInvalidYAML(t *testing.T) {
 		{"duplicate key", strings.Replace(validTaskYAML, "title: Fix", "title: Fix\ntitle: Again", 1)},
 		{"multiple documents", validTaskYAML + "---\nid: T-0002\n"},
 		{"windows path", strings.Replace(validTaskYAML, "objective: Repair", "objective: C:\\\\Users\\\\name", 1)},
-		{"unix path", strings.Replace(validTaskYAML, "objective: Repair", "objective: /home/name/project", 1)},
 		{"credential field", validTaskYAML + "access_token: secret\n"},
 		{"non UTC timestamp", strings.Replace(validTaskYAML, "2026-07-24T14:00:00Z", "2026-07-24T22:00:00+08:00", 1)},
 		{"unknown project", strings.Replace(validTaskYAML, "project-1", "project-2", 1)},
@@ -61,6 +60,21 @@ func TestDecodeTaskRejectsUnsafeOrInvalidYAML(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := DecodeTask([]byte(tt.content), "T-0001.yaml", testReferences{}); err == nil {
 				t.Fatal("DecodeTask() error = nil")
+			}
+		})
+	}
+}
+
+func TestDecodeTaskRejectsSupportedLocalFilesystemPaths(t *testing.T) {
+	for _, path := range []string{
+		"/home/name/project", "/Users/name/project", "/root/project", "/tmp/project", "/var/lib/project",
+		"/etc/project", "/opt/project", "/usr/local/project", "/mnt/d/project", "/srv/project",
+		"/workspace/project", "~/project", "file:///home/name/project",
+	} {
+		t.Run(path, func(t *testing.T) {
+			content := strings.Replace(validTaskYAML, "objective: Repair", "objective: "+path, 1)
+			if _, err := DecodeTask([]byte(content), "T-0001.yaml", testReferences{}); err == nil {
+				t.Fatal("local filesystem path accepted")
 			}
 		})
 	}
