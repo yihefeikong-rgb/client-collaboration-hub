@@ -3,7 +3,8 @@
 ## 原则
 
 命令名为 `collab`。它是所有正式状态变化的唯一入口：负责状态机校验、事件追加、
-证据引用、乐观锁、临时文件原子替换和恢复。CLI 通过 `TaskJournal` 写入，不能绕过它。
+证据引用、乐观锁、临时文件原子替换和恢复。CLI 通过 `TaskJournal.CreateTask`、
+`CommitTransition` 与 `AppendMessage` 写入，不能绕过它或自行拼装 Event/State。
 文件保持可读可审计，但人或客户端不得
 直接编辑 `state.json`、`messages.jsonl` 或证据索引。
 

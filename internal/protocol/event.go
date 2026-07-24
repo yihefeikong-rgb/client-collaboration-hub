@@ -33,6 +33,7 @@ type Event struct {
 	Body            string    `json:"body"`
 	EvidenceRefs    []string  `json:"evidence_refs"`
 	ExpectedVersion int64     `json:"expected_version"`
+	TargetClient    string    `json:"target_client,omitempty"`
 }
 
 func (e Event) Validate(taskID string) error {
@@ -50,6 +51,13 @@ func (e Event) Validate(taskID string) error {
 	}
 	if !knownEventType(e.Type) {
 		return fmt.Errorf("unknown event type %q", e.Type)
+	}
+	if e.Type == EventAssigned {
+		if !IsValidID(e.TargetClient) {
+			return fmt.Errorf("assigned event requires valid target_client")
+		}
+	} else if e.TargetClient != "" {
+		return fmt.Errorf("event type %q must not include target_client", e.Type)
 	}
 	if eventNeedsBody(e.Type) && strings.TrimSpace(e.Body) == "" {
 		return fmt.Errorf("event type %q requires body", e.Type)
@@ -98,7 +106,7 @@ func knownEventType(eventType EventType) bool {
 
 func eventNeedsBody(eventType EventType) bool {
 	switch eventType {
-	case EventTaskCreated, EventMessageAdded, EventEvidenceAdded, EventChangesRequested, EventBlocked:
+	case EventTaskCreated, EventMessageAdded, EventEvidenceAdded, EventChangesRequested:
 		return true
 	default:
 		return false

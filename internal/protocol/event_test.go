@@ -6,7 +6,7 @@ import (
 )
 
 func TestDecodeEventLineStrict(t *testing.T) {
-	data := []byte(`{"event_id":1,"task_id":"T-0001","type":"assigned","actor":"codex","at":"2026-07-25T00:00:00Z","body":"","evidence_refs":[],"expected_version":0}`)
+	data := []byte(`{"event_id":1,"task_id":"T-0001","type":"assigned","actor":"codex","at":"2026-07-25T00:00:00Z","body":"","evidence_refs":[],"expected_version":0,"target_client":"cc-haha"}`)
 	if _, err := DecodeEventLine(data, "T-0001"); err != nil {
 		t.Fatal(err)
 	}

@@ -9,15 +9,18 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/protocol"
+	"gopkg.in/yaml.v3"
 )
 
 var (
-	ErrVersionConflict  = errors.New("version conflict")
-	ErrRecoveryRequired = errors.New("recovery required")
-	ErrCorrupt          = errors.New("task journal is corrupt")
+	ErrVersionConflict      = errors.New("version conflict")
+	ErrRecoveryRequired     = errors.New("recovery required")
+	ErrCorrupt              = errors.New("task journal is corrupt")
+	ErrCommitOutcomeUnknown = errors.New("commit outcome unknown")
 )
 
 type Health string
@@ -45,7 +48,9 @@ type RecoveryReport struct {
 
 type TaskJournal interface {
 	Inspect(context.Context, string) (HealthReport, error)
-	Commit(context.Context, string, int64, protocol.Event, protocol.State) error
+	CreateTask(context.Context, protocol.Task, time.Time) error
+	CommitTransition(context.Context, string, int64, protocol.TransitionRequest, []string) (protocol.State, error)
+	AppendMessage(context.Context, string, int64, string, string, time.Time) (protocol.State, error)
 	RecoverTail(context.Context, string) (RecoveryReport, error)
 }
 
@@ -71,6 +76,8 @@ type FileSystem interface {
 	OpenFile(string, int, os.FileMode) (SyncFile, error)
 	CreateTemp(string, string) (SyncFile, string, error)
 	MkdirAll(string, os.FileMode) error
+	MkdirTemp(string, string) (string, error)
+	Stat(string) (os.FileInfo, error)
 	Remove(string) error
 }
 
@@ -84,8 +91,10 @@ func (osFileSystem) CreateTemp(dir, pattern string) (SyncFile, string, error) {
 	file, err := os.CreateTemp(dir, pattern)
 	return file, fileName(file), err
 }
-func (osFileSystem) MkdirAll(path string, perm os.FileMode) error { return os.MkdirAll(path, perm) }
-func (osFileSystem) Remove(path string) error                     { return os.Remove(path) }
+func (osFileSystem) MkdirAll(path string, perm os.FileMode) error  { return os.MkdirAll(path, perm) }
+func (osFileSystem) MkdirTemp(dir, pattern string) (string, error) { return os.MkdirTemp(dir, pattern) }
+func (osFileSystem) Stat(path string) (os.FileInfo, error)         { return os.Stat(path) }
+func (osFileSystem) Remove(path string) error                      { return os.Remove(path) }
 
 func fileName(file *os.File) string {
 	if file == nil {
@@ -121,44 +130,185 @@ func (j *FileTaskJournal) Inspect(ctx context.Context, taskID string) (HealthRep
 	return j.inspectUnlocked(taskID)
 }
 
-func (j *FileTaskJournal) Commit(ctx context.Context, taskID string, expectedVersion int64, event protocol.Event, nextState protocol.State) error {
-	lock, err := j.Locks.Task(ctx, taskID)
+func (j *FileTaskJournal) CreateTask(ctx context.Context, task protocol.Task, at time.Time) error {
+	if err := task.Validate(task.ID, nil); err != nil {
+		return err
+	}
+	if err := validateJournalTime(at); err != nil {
+		return err
+	}
+	lock, err := j.Locks.Task(ctx, task.ID)
 	if err != nil {
 		return err
 	}
 	defer lock.Unlock()
-	report, err := j.inspectUnlocked(taskID)
+	if _, err := j.FS.Stat(j.taskDir(task.ID)); err == nil || !errors.Is(err, os.ErrNotExist) {
+		if err == nil {
+			return fmt.Errorf("task %q already exists", task.ID)
+		}
+		return err
+	}
+	parent := filepath.Join(j.Root, "tasks")
+	if err := j.FS.MkdirAll(parent, 0o700); err != nil {
+		return err
+	}
+	tempDir, err := j.FS.MkdirTemp(parent, ".task-")
 	if err != nil {
 		return err
+	}
+	defer os.RemoveAll(tempDir)
+	event := protocol.Event{EventID: 1, TaskID: task.ID, Type: protocol.EventTaskCreated, Actor: task.Creator, At: at, Body: task.Title, ExpectedVersion: 0}
+	state := protocol.State{TaskID: task.ID, Status: protocol.Draft, Version: 1, LastEventID: 1, ResponsibleClient: task.Creator, UpdatedAt: at}
+	if err := j.writeTaskFiles(tempDir, task, state, event); err != nil {
+		return err
+	}
+	return j.Replacer.Replace(tempDir, j.taskDir(task.ID))
+}
+
+func (j *FileTaskJournal) writeTaskFiles(dir string, task protocol.Task, state protocol.State, event protocol.Event) error {
+	taskData, err := yaml.Marshal(task)
+	if err != nil {
+		return err
+	}
+	stateData, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	eventData, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	for name, data := range map[string][]byte{
+		"task.yaml":      taskData,
+		"state.json":     append(stateData, '\n'),
+		"messages.jsonl": append(eventData, '\n'),
+	} {
+		if err := j.writeNewFile(filepath.Join(dir, name), data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (j *FileTaskJournal) writeNewFile(path string, data []byte) error {
+	file, err := j.FS.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	writeErr := writeFull(file, data)
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
+}
+
+func (j *FileTaskJournal) CommitTransition(ctx context.Context, taskID string, expectedVersion int64, request protocol.TransitionRequest, evidenceRefs []string) (protocol.State, error) {
+	lock, err := j.Locks.Task(ctx, taskID)
+	if err != nil {
+		return protocol.State{}, err
+	}
+	defer lock.Unlock()
+	report, err := j.inspectUnlocked(taskID)
+	if err != nil {
+		return protocol.State{}, err
 	}
 	switch report.Health {
 	case RecoverableTail:
-		return ErrRecoveryRequired
+		return protocol.State{}, ErrRecoveryRequired
 	case Corrupt:
-		return ErrCorrupt
+		return protocol.State{}, ErrCorrupt
 	}
 	if expectedVersion != report.State.Version {
-		return ErrVersionConflict
+		return protocol.State{}, ErrVersionConflict
 	}
-	if err := j.validateCommit(taskID, report.State, event, nextState); err != nil {
-		return err
-	}
-	encodedEvent, err := json.Marshal(event)
+	task, err := j.readTask(taskID)
 	if err != nil {
-		return err
+		return protocol.State{}, err
 	}
-	if err := j.appendAndSync(j.messagesPath(taskID), append(encodedEvent, '\n')); err != nil {
-		return err
-	}
-	if err := j.writeStateAtomically(j.statePath(taskID), nextState); err != nil {
-		return err
-	}
-	final, err := j.inspectUnlocked(taskID)
+	nextState, err := protocol.Transition(report.State, task, request)
 	if err != nil {
-		return err
+		return protocol.State{}, err
 	}
-	if final.Health != Healthy {
-		return fmt.Errorf("commit postcondition: %w", ErrCorrupt)
+	event, err := eventForTransition(taskID, report.State, request, evidenceRefs)
+	if err != nil {
+		return protocol.State{}, err
+	}
+	if err := j.commitRecord(taskID, report.State, event, nextState); err != nil {
+		return protocol.State{}, err
+	}
+	return nextState, nil
+}
+
+func (j *FileTaskJournal) AppendMessage(ctx context.Context, taskID string, expectedVersion int64, actor, body string, at time.Time) (protocol.State, error) {
+	lock, err := j.Locks.Task(ctx, taskID)
+	if err != nil {
+		return protocol.State{}, err
+	}
+	defer lock.Unlock()
+	report, err := j.inspectUnlocked(taskID)
+	if err != nil {
+		return protocol.State{}, err
+	}
+	if report.Health == RecoverableTail {
+		return protocol.State{}, ErrRecoveryRequired
+	}
+	if report.Health == Corrupt {
+		return protocol.State{}, ErrCorrupt
+	}
+	if expectedVersion != report.State.Version {
+		return protocol.State{}, ErrVersionConflict
+	}
+	if !protocol.IsValidID(actor) || strings.TrimSpace(body) == "" || validateJournalTime(at) != nil || at.Before(report.State.UpdatedAt) {
+		return protocol.State{}, fmt.Errorf("invalid message intent")
+	}
+	next := report.State
+	next.Version++
+	next.LastEventID++
+	next.UpdatedAt = at
+	event := protocol.Event{EventID: next.LastEventID, TaskID: taskID, Type: protocol.EventMessageAdded, Actor: actor, At: at, Body: body, ExpectedVersion: report.State.Version}
+	if err := j.commitRecord(taskID, report.State, event, next); err != nil {
+		return protocol.State{}, err
+	}
+	return next, nil
+}
+
+func eventForTransition(taskID string, state protocol.State, request protocol.TransitionRequest, evidenceRefs []string) (protocol.Event, error) {
+	var eventType protocol.EventType
+	switch request.Action {
+	case protocol.Assign:
+		eventType = protocol.EventAssigned
+	case protocol.Accept:
+		eventType = protocol.EventAccepted
+	case protocol.Submit:
+		eventType = protocol.EventSubmitted
+	case protocol.RequestChanges:
+		eventType = protocol.EventChangesRequested
+	case protocol.Resume:
+		eventType = protocol.EventRevisionStarted
+	case protocol.Approve:
+		eventType = protocol.EventApproved
+	case protocol.Block:
+		eventType = protocol.EventBlocked
+	default:
+		return protocol.Event{}, fmt.Errorf("unknown transition action %q", request.Action)
+	}
+	event := protocol.Event{EventID: state.LastEventID + 1, TaskID: taskID, Type: eventType, Actor: request.Actor, At: request.At, EvidenceRefs: evidenceRefs, ExpectedVersion: state.Version}
+	if request.Action == protocol.Assign {
+		event.TargetClient = request.NextAssignee
+	}
+	if request.Action == protocol.RequestChanges {
+		event.Body = request.Feedback
+	}
+	return event, event.Validate(taskID)
+}
+
+func validateJournalTime(at time.Time) error {
+	if at.IsZero() || at.Location() != time.UTC {
+		return fmt.Errorf("time must be UTC and non-zero")
 	}
 	return nil
 }
@@ -234,10 +384,7 @@ func (j *FileTaskJournal) inspectUnlocked(taskID string) (HealthReport, error) {
 func inspectJournal(data []byte, taskID string, state protocol.State) (HealthReport, error) {
 	report := HealthReport{Health: Healthy, State: state}
 	if len(data) == 0 {
-		if state.LastEventID == 0 {
-			return report, nil
-		}
-		return corruptReport(report, "state is ahead of event log"), nil
+		return corruptReport(report, "task_created event is missing"), nil
 	}
 	if data[len(data)-1] != '\n' {
 		return corruptReport(report, "incomplete JSONL tail"), nil
@@ -245,12 +392,21 @@ func inspectJournal(data []byte, taskID string, state protocol.State) (HealthRep
 	var offset int64
 	var tail protocol.Event
 	var tailOffset int64
+	var previousAt time.Time
+	var lastStatus protocol.EventType
 	lines := bytes.Split(data[:len(data)-1], []byte{'\n'})
 	for index, line := range lines {
 		lineEnd := offset + int64(len(line)+1)
 		event, err := protocol.DecodeEventLine(line, taskID)
-		if err != nil || event.EventID != int64(index+1) {
+		if err != nil || event.EventID != int64(index+1) || event.ExpectedVersion != int64(index) || (!previousAt.IsZero() && event.At.Before(previousAt)) {
 			return corruptReport(report, "invalid or non-contiguous event"), nil
+		}
+		if index == 0 && event.Type != protocol.EventTaskCreated {
+			return corruptReport(report, "first event must be task_created"), nil
+		}
+		previousAt = event.At
+		if event.EventID <= state.LastEventID && event.Type != protocol.EventMessageAdded {
+			lastStatus = event.Type
 		}
 		report.EventCount++
 		report.LastEventID = event.EventID
@@ -259,13 +415,16 @@ func inspectJournal(data []byte, taskID string, state protocol.State) (HealthRep
 		}
 		offset = lineEnd
 	}
-	if report.LastEventID < state.LastEventID {
+	if report.LastEventID < state.LastEventID || state.Version != state.LastEventID {
 		return corruptReport(report, "state last_event_id does not match event log"), nil
 	}
 	if report.LastEventID == state.LastEventID {
+		if !state.UpdatedAt.Equal(previousAt) || !eventTypeMatchesState(lastStatus, state.Status) {
+			return corruptReport(report, "state does not match committed event chain"), nil
+		}
 		return report, nil
 	}
-	if report.LastEventID == state.LastEventID+1 && tail.ExpectedVersion == state.Version {
+	if report.LastEventID == state.LastEventID+1 && tail.ExpectedVersion == state.Version && !tail.At.Before(state.UpdatedAt) {
 		report.Health = RecoverableTail
 		report.TailOffset = tailOffset
 		return report, nil
@@ -279,12 +438,29 @@ func corruptReport(report HealthReport, reason string) HealthReport {
 	return report
 }
 
-func (j *FileTaskJournal) validateCommit(taskID string, state protocol.State, event protocol.Event, next protocol.State) error {
-	taskData, err := j.FS.ReadFile(filepath.Join(j.taskDir(taskID), "task.yaml"))
-	if err != nil {
-		return err
+func eventTypeMatchesState(eventType protocol.EventType, status protocol.Status) bool {
+	switch eventType {
+	case protocol.EventTaskCreated:
+		return status == protocol.Draft
+	case protocol.EventAssigned:
+		return status == protocol.Assigned
+	case protocol.EventAccepted, protocol.EventRevisionStarted:
+		return status == protocol.Working
+	case protocol.EventSubmitted:
+		return status == protocol.Review
+	case protocol.EventChangesRequested:
+		return status == protocol.RevisionRequired
+	case protocol.EventApproved:
+		return status == protocol.Done
+	case protocol.EventBlocked:
+		return status == protocol.Blocked
+	default:
+		return false
 	}
-	task, err := protocol.DecodeTask(taskData, taskID+".yaml", nil)
+}
+
+func (j *FileTaskJournal) commitRecord(taskID string, state protocol.State, event protocol.Event, next protocol.State) error {
+	task, err := j.readTask(taskID)
 	if err != nil {
 		return err
 	}
@@ -297,7 +473,33 @@ func (j *FileTaskJournal) validateCommit(taskID string, state protocol.State, ev
 	if next.TaskID != taskID || next.Version != state.Version+1 || next.LastEventID != event.EventID || !next.UpdatedAt.Equal(event.At) {
 		return fmt.Errorf("next state does not match event")
 	}
-	return next.Validate(task)
+	if err := next.Validate(task); err != nil {
+		return err
+	}
+	encodedEvent, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	if err := j.appendAndSync(j.messagesPath(taskID), append(encodedEvent, '\n')); err != nil {
+		return err
+	}
+	if err := j.writeStateAtomically(j.statePath(taskID), next); err != nil {
+		return err
+	}
+	final, err := j.inspectUnlocked(taskID)
+	if err != nil || final.Health != Healthy || final.State != next || final.LastEventID != event.EventID {
+		return fmt.Errorf("%w: inspect after replacement", ErrCommitOutcomeUnknown)
+	}
+	return nil
+}
+
+func (j *FileTaskJournal) readTask(taskID string) (protocol.Task, error) {
+	var task protocol.Task
+	data, err := j.FS.ReadFile(filepath.Join(j.taskDir(taskID), "task.yaml"))
+	if err != nil {
+		return task, err
+	}
+	return protocol.DecodeTask(data, taskID+".yaml", nil)
 }
 
 func (j *FileTaskJournal) readState(taskID string) (protocol.State, error) {
@@ -329,10 +531,7 @@ func (j *FileTaskJournal) appendAndSync(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	n, writeErr := file.Write(data)
-	if writeErr == nil && n != len(data) {
-		writeErr = io.ErrShortWrite
-	}
+	writeErr := writeFull(file, data)
 	if writeErr == nil {
 		writeErr = file.Sync()
 	}
@@ -356,7 +555,7 @@ func (j *FileTaskJournal) writeStateAtomically(path string, state protocol.State
 		return err
 	}
 	defer j.FS.Remove(tempPath)
-	if _, err := file.Write(append(data, '\n')); err != nil {
+	if err := writeFull(file, append(data, '\n')); err != nil {
 		file.Close()
 		return err
 	}
@@ -401,7 +600,7 @@ func (j *FileTaskJournal) writeBackup(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	_, writeErr := file.Write(data)
+	writeErr := writeFull(file, data)
 	if writeErr == nil {
 		writeErr = file.Sync()
 	}
@@ -410,6 +609,17 @@ func (j *FileTaskJournal) writeBackup(path string, data []byte) error {
 		return writeErr
 	}
 	return closeErr
+}
+
+func writeFull(file SyncFile, data []byte) error {
+	n, err := file.Write(data)
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 func (j *FileTaskJournal) taskDir(taskID string) string {
