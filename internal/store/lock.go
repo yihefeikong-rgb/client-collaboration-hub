@@ -3,10 +3,12 @@ package store
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/huangxinyang/client-collaboration-hub/internal/protocol"
 )
 
 type Lock interface {
@@ -22,6 +24,9 @@ type FlockLocker struct {
 }
 
 func (l FlockLocker) Lock(ctx context.Context, path string) (Lock, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
 	delay := l.RetryDelay
 	if delay == 0 {
 		delay = 10 * time.Millisecond
@@ -43,13 +48,16 @@ type ScopedLocks struct {
 }
 
 func (s ScopedLocks) Task(ctx context.Context, taskID string) (Lock, error) {
-	return s.Locker.Lock(ctx, filepath.Join(s.Root, "tasks", taskID, ".lock"))
+	if !protocol.IsValidID(taskID) {
+		return nil, fmt.Errorf("invalid task lock id %q", taskID)
+	}
+	return s.Locker.Lock(ctx, filepath.Join(s.Root, ".runtime", "locks", "tasks", taskID+".lock"))
 }
 
 func (s ScopedLocks) Projects(ctx context.Context) (Lock, error) {
-	return s.Locker.Lock(ctx, filepath.Join(s.Root, "projects", ".lock"))
+	return s.Locker.Lock(ctx, filepath.Join(s.Root, ".runtime", "locks", "projects.lock"))
 }
 
 func (s ScopedLocks) Clients(ctx context.Context) (Lock, error) {
-	return s.Locker.Lock(ctx, filepath.Join(s.Root, "clients", ".lock"))
+	return s.Locker.Lock(ctx, filepath.Join(s.Root, ".runtime", "locks", "clients.lock"))
 }

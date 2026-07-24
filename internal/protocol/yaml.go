@@ -12,22 +12,48 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var absolutePathPattern = regexp.MustCompile(`^(?:[A-Za-z]:[\\/]|/|\\\\)`)
+var absolutePathPattern = regexp.MustCompile(`^(?:[A-Za-z]:[\\/]|\\\\)`)
 
 func DecodeTask(data []byte, path string, refs References) (Task, error) {
 	var task Task
-	if err := validateYAML(data); err != nil {
-		return task, err
-	}
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&task); err != nil {
+	if err := decodeYAML(data, &task); err != nil {
 		return task, fmt.Errorf("decode task: %w", err)
 	}
 	if err := task.Validate(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), refs); err != nil {
 		return task, err
 	}
 	return task, nil
+}
+
+func DecodeProject(data []byte, path string) (Project, error) {
+	var project Project
+	if err := decodeYAML(data, &project); err != nil {
+		return project, fmt.Errorf("decode project: %w", err)
+	}
+	if err := project.Validate(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))); err != nil {
+		return project, err
+	}
+	return project, nil
+}
+
+func DecodeClient(data []byte, path string) (Client, error) {
+	var client Client
+	if err := decodeYAML(data, &client); err != nil {
+		return client, fmt.Errorf("decode client: %w", err)
+	}
+	if err := client.Validate(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))); err != nil {
+		return client, err
+	}
+	return client, nil
+}
+
+func decodeYAML(data []byte, target any) error {
+	if err := validateYAML(data); err != nil {
+		return err
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	return decoder.Decode(target)
 }
 
 func validateYAML(data []byte) error {
@@ -69,7 +95,7 @@ func inspectNode(node *yaml.Node) error {
 		}
 		return nil
 	}
-	if node.Kind == yaml.ScalarNode && absolutePathPattern.MatchString(node.Value) {
+	if node.Kind == yaml.ScalarNode && (absolutePathPattern.MatchString(node.Value) || unixHomePath(node.Value)) {
 		return fmt.Errorf("absolute paths are forbidden in transferable yaml")
 	}
 	for _, child := range node.Content {
@@ -81,11 +107,14 @@ func inspectNode(node *yaml.Node) error {
 }
 
 func forbiddenKey(key string) bool {
-	key = strings.ToLower(key)
-	for _, forbidden := range []string{"path", "pid", "pty", "session", "secret", "token", "password", "credential", "api_key"} {
-		if strings.Contains(key, forbidden) {
-			return true
-		}
-	}
-	return false
+	key = strings.ReplaceAll(strings.ToLower(key), "-", "_")
+	_, forbidden := map[string]struct{}{
+		"local_path": {}, "absolute_path": {}, "pid": {}, "pty": {}, "session_id": {},
+		"secret": {}, "token": {}, "access_token": {}, "password": {}, "credential": {}, "api_key": {},
+	}[key]
+	return forbidden
+}
+
+func unixHomePath(value string) bool {
+	return strings.HasPrefix(value, "/home/") || strings.HasPrefix(value, "/Users/")
 }

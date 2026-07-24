@@ -24,6 +24,7 @@ client-collaboration-hub/
     tasks/<task-id>/evidence/<evidence-id>.json
     tasks/<task-id>/handoff.md
     bindings/<device-id>/<project-id>.local.json  # .gitignore，不可迁移
+    .runtime/locks/tasks/<task-id>.lock           # .gitignore，不可迁移
 ```
 
 `collaboration/` 的任务数据可进入 Git；`bindings/` 是设备本地映射，必须忽略。
@@ -32,7 +33,7 @@ client-collaboration-hub/
 ## 核心模型
 
 `task.yaml`：`id`、`project_id`、`title`、`objective`、`acceptance`、`creator`、
-`assignee`、`reviewer`、`created_at`。创建时 `reviewer` 默认等于 `creator`，可显式
+`reviewer`、`created_at`。创建时 `reviewer` 默认等于 `creator`，可显式
 指定；创建后不可更改 `id` 与 `project_id`。
 
 `state.json`：
@@ -43,6 +44,7 @@ client-collaboration-hub/
   "status": "ASSIGNED",
   "version": 2,
   "last_event_id": 4,
+  "assigned_client": "cc-haha",
   "responsible_client": "cc-haha",
   "updated_at": "2026-07-24T14:00:00Z"
 }
@@ -80,11 +82,21 @@ DRAFT -> ASSIGNED -> WORKING -> REVIEW -> DONE
 除表中转换外一律拒绝。`BLOCKED` 不能隐式恢复；创建者重新 assign 后才进入
 `ASSIGNED`。
 
+动态指派只存在于 `state.json` 和事件，不存在于 `task.yaml`。责任字段的固定语义为：
+
+| 状态 | `assigned_client` | `responsible_client` |
+| --- | --- | --- |
+| `DRAFT` | 空 | `creator` |
+| `ASSIGNED`、`WORKING` | 执行者 | 执行者 |
+| `REVIEW`、`DONE` | 执行者 | `reviewer` |
+| `REVISION_REQUIRED` | 执行者 | 执行者 |
+| `BLOCKED` | 保留 | 保留阻塞前责任方 |
+
 ## 原子性与并发
 
-正式变更只能由 CLI 完成。每个任务使用 `tasks/<task-id>/.lock`；持锁后必须重新
-读取状态、检查 `--expected-version`、校验证据并写入。项目创建与客户端注册分别使用
-`projects/.lock`、`clients/.lock`；禁止全仓库锁。锁阻止同时通过版本检查，乐观锁拒绝
+正式变更只能由 CLI 完成。锁文件位于 `.runtime/locks/`：任务使用
+`tasks/<task-id>.lock`，项目使用 `projects.lock`，客户端使用 `clients.lock`。持锁后必须
+重新读取状态、检查 `--expected-version`、校验证据并写入；禁止全仓库锁。锁阻止同时通过版本检查，乐观锁拒绝
 基于旧状态的调用。
 
 MVP 保留 JSONL。成功写入顺序为：验证输入和引用 → 追加一条完整事件 → 将新 state

@@ -33,7 +33,8 @@
 所有读取版本并可能写入状态、事件或证据的命令均在任务锁内重新读取文件并要求
 `--expected-version`。`message add` 也要求版本，确保事件 ID 与 state 的
 `last_event_id` 同步。`evidence add` 不改变任务状态，但必须校验 task ID、证据 ID
-唯一性及引用文件存在性。项目创建与客户端注册使用各自目录锁，而不是全局锁。
+唯一性及引用文件存在性。锁文件写在 `.runtime/locks/`；项目创建与客户端注册使用
+各自锁，而不是全局锁。
 
 `task create` 默认 `reviewer=creator`，可用 `--reviewer` 覆盖。`review approve` 和
 `review request-changes` 只允许该 `reviewer` 执行。

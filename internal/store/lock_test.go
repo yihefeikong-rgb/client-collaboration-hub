@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -37,9 +38,9 @@ func TestScopedLocksUseNarrowPaths(t *testing.T) {
 		}
 	}
 	want := []string{
-		filepath.Join("root", "tasks", "T-0001", ".lock"),
-		filepath.Join("root", "projects", ".lock"),
-		filepath.Join("root", "clients", ".lock"),
+		filepath.Join("root", ".runtime", "locks", "tasks", "T-0001.lock"),
+		filepath.Join("root", ".runtime", "locks", "projects.lock"),
+		filepath.Join("root", ".runtime", "locks", "clients.lock"),
 	}
 	for i := range want {
 		if fake.paths[i] != want[i] {
@@ -48,10 +49,39 @@ func TestScopedLocksUseNarrowPaths(t *testing.T) {
 	}
 }
 
+func TestScopedLocksRejectTaskPathTraversal(t *testing.T) {
+	fake := &fakeLocker{}
+	locks := ScopedLocks{Root: "root", Locker: fake}
+	for _, taskID := range []string{"", "..", "../projects", "T/0001", `T\0001`, `C:\temp`} {
+		if _, err := locks.Task(context.Background(), taskID); err == nil {
+			t.Fatalf("Task(%q) error = nil", taskID)
+		}
+	}
+	if len(fake.paths) != 0 {
+		t.Fatalf("invalid task IDs reached locker: %#v", fake.paths)
+	}
+}
+
 func TestScopedLocksReturnLockerError(t *testing.T) {
 	want := errors.New("locked")
 	locks := ScopedLocks{Root: "root", Locker: &fakeLocker{err: want}}
 	if _, err := locks.Task(context.Background(), "T-0001"); !errors.Is(err, want) {
 		t.Fatalf("Task() error = %v, want %v", err, want)
+	}
+}
+
+func TestFlockLockerCreatesOnlyRuntimeLockDirectory(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".runtime", "locks", "tasks", "T-0001.lock")
+	lock, err := (FlockLocker{}).Lock(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Unlock()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("lock file missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "tasks")); !os.IsNotExist(err) {
+		t.Fatalf("task data directory should not be created, stat error = %v", err)
 	}
 }

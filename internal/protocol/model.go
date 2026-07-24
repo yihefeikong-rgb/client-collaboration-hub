@@ -27,7 +27,6 @@ type Task struct {
 	Objective  string    `yaml:"objective"`
 	Acceptance []string  `yaml:"acceptance"`
 	Creator    string    `yaml:"creator"`
-	Assignee   string    `yaml:"assignee"`
 	Reviewer   string    `yaml:"reviewer"`
 	CreatedAt  time.Time `yaml:"created_at"`
 }
@@ -54,7 +53,26 @@ func (c Client) Validate(expectedID string) error {
 	if c.Name == "" {
 		return fmt.Errorf("client name is required")
 	}
+	if len(c.Capabilities) == 0 {
+		return fmt.Errorf("client capabilities are required")
+	}
+	seen := map[string]bool{}
+	for _, capability := range c.Capabilities {
+		if !knownCapability(capability) || seen[capability] {
+			return fmt.Errorf("invalid client capability %q", capability)
+		}
+		seen[capability] = true
+	}
 	return nil
+}
+
+func knownCapability(capability string) bool {
+	switch capability {
+	case "create_task", "execute", "review", "import_export":
+		return true
+	default:
+		return false
+	}
 }
 
 func (t Task) Validate(expectedID string, refs References) error {
@@ -77,11 +95,6 @@ func (t Task) Validate(expectedID string, refs References) error {
 			return err
 		}
 	}
-	if t.Assignee != "" {
-		if err := validateID("assignee", t.Assignee, ""); err != nil {
-			return err
-		}
-	}
 	if err := validateUTCTime("task created_at", t.CreatedAt); err != nil {
 		return err
 	}
@@ -91,7 +104,7 @@ func (t Task) Validate(expectedID string, refs References) error {
 	if !refs.ProjectExists(t.ProjectID) {
 		return fmt.Errorf("unknown project_id %q", t.ProjectID)
 	}
-	for _, id := range []string{t.Creator, t.Reviewer, t.Assignee} {
+	for _, id := range []string{t.Creator, t.Reviewer} {
 		if id != "" && !refs.ClientExists(id) {
 			return fmt.Errorf("unknown client %q", id)
 		}
@@ -100,13 +113,17 @@ func (t Task) Validate(expectedID string, refs References) error {
 }
 
 func validateID(field, value, expected string) error {
-	if !idPattern.MatchString(value) {
+	if !IsValidID(value) {
 		return fmt.Errorf("%s %q is invalid", field, value)
 	}
 	if expected != "" && value != expected {
 		return fmt.Errorf("%s %q does not match file id %q", field, value, expected)
 	}
 	return nil
+}
+
+func IsValidID(value string) bool {
+	return idPattern.MatchString(value)
 }
 
 func validateUTCTime(field string, value time.Time) error {
