@@ -1,0 +1,91 @@
+package protocol
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+var absolutePathPattern = regexp.MustCompile(`^(?:[A-Za-z]:[\\/]|/|\\\\)`)
+
+func DecodeTask(data []byte, path string, refs References) (Task, error) {
+	var task Task
+	if err := validateYAML(data); err != nil {
+		return task, err
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&task); err != nil {
+		return task, fmt.Errorf("decode task: %w", err)
+	}
+	if err := task.Validate(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), refs); err != nil {
+		return task, err
+	}
+	return task, nil
+}
+
+func validateYAML(data []byte) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		return fmt.Errorf("decode yaml document: %w", err)
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("yaml must contain one document")
+		}
+		return fmt.Errorf("decode additional yaml document: %w", err)
+	}
+	return inspectNode(&document)
+}
+
+func inspectNode(node *yaml.Node) error {
+	if node.Kind == yaml.MappingNode {
+		seen := map[string]bool{}
+		for i := 0; i < len(node.Content); i += 2 {
+			key, value := node.Content[i], node.Content[i+1]
+			if seen[key.Value] {
+				return fmt.Errorf("duplicate yaml key %q", key.Value)
+			}
+			seen[key.Value] = true
+			if forbiddenKey(key.Value) {
+				return fmt.Errorf("forbidden transferable field %q", key.Value)
+			}
+			if key.Value == "created_at" {
+				if _, err := time.Parse(time.RFC3339, value.Value); err != nil || !strings.HasSuffix(value.Value, "Z") {
+					return fmt.Errorf("created_at must be UTC RFC 3339")
+				}
+			}
+			if err := inspectNode(value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if node.Kind == yaml.ScalarNode && absolutePathPattern.MatchString(node.Value) {
+		return fmt.Errorf("absolute paths are forbidden in transferable yaml")
+	}
+	for _, child := range node.Content {
+		if err := inspectNode(child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func forbiddenKey(key string) bool {
+	key = strings.ToLower(key)
+	for _, forbidden := range []string{"path", "pid", "pty", "session", "secret", "token", "password", "credential", "api_key"} {
+		if strings.Contains(key, forbidden) {
+			return true
+		}
+	}
+	return false
+}
