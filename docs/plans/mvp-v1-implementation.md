@@ -26,8 +26,8 @@ client-collaboration-hub/
 
 1. Go module、文件模型、严格 YAML 与状态机 → 为每条合法/非法转换编写单元测试；验证不可越级、`reviewer` 和责任方限制。
 2. 文件锁抽象与测试替身 → 验证每任务锁、项目锁、客户端锁的选择；协议层不依赖具体锁库。
-3. 文件存储与原子写入 → 模拟 append、临时 state、替换各阶段失败；验证 recover 的尾部截断与 `CORRUPT` 只读保护。
-4. CLI 基础命令 → 验证输入、退出码、expected-version 冲突和证据引用失败。
+3. 文件存储与原子写入 → 已实现 `TaskJournal`、JSONL 健康检查、原子 State 替换、故障注入及唯一尾部截断恢复；`CORRUPT` 保持只读。
+4. CLI 基础命令 → 后续验证输入、退出码、expected-version 冲突和证据引用失败。
 5. 手工适配器 → 验证 export 的交接包不含绝对路径/凭据，import 的候选事件必须经 CLI。
 6. 演示 fixture → 以端到端测试执行 `T-0001` 的完整返工和重新 binding。
 

@@ -99,12 +99,17 @@ DRAFT -> ASSIGNED -> WORKING -> REVIEW -> DONE
 重新读取状态、检查 `--expected-version`、校验证据并写入；禁止全仓库锁。锁阻止同时通过版本检查，乐观锁拒绝
 基于旧状态的调用。
 
-MVP 保留 JSONL。成功写入顺序为：验证输入和引用 → 追加一条完整事件 → 将新 state
-写入同目录临时文件 → fsync/关闭 → 原子替换。append 成功但 state 替换失败时以退出码
-`4` 失败。`recover` 仅可在生成备份后自动截断“恰好多一条完整尾部事件、ID 为
-`last_event_id + 1`、且没有后续事件”的情形。JSONL 行不完整、多出多条事件、ID 不连续
-或 state 超前时，进入只读 `CORRUPT` 存储健康状态；它不是业务状态，CLI 不得猜测修复。
-恢复必须有故障注入测试。CLI 不提供人工 JSON 编辑入口。
+MVP 保留 JSONL，且 `TaskJournal` 是事件与状态的唯一事务写入口。成功写入顺序为：
+持任务锁并 Inspect → 校验版本和不变量 → 追加一条完整事件并 Sync → 将新 state 写入
+同目录临时文件并 Sync/Close → 经 `AtomicReplacer` 原子替换 → 重新 Inspect。调用方不能
+自行追加 JSONL 或单独保存 State。
+
+健康状态为 `HEALTHY`、`RECOVERABLE_TAIL` 与 `CORRUPT`。只有“恰好多一条完整尾部
+事件、ID 为 `last_event_id + 1`、expected version 等于当前 state version”可由 `recover`
+在备份后截断。JSONL 行不完整、多出多条事件、ID 不连续、state 超前、非法 JSON 或任务
+ID 不一致时为只读 `CORRUPT`；它不是业务状态，CLI 不得猜测修复。备份写入设备本地的
+`.runtime/recovery/`。实现已在 Windows 与 Unix CI 测试原子替换，但不承诺任意文件系统
+在断电情形都具备相同持久性。CLI 不提供人工 JSON 编辑入口。
 
 YAML 以 `yaml.v3` 的 `KnownFields(true)` 解码，并在模型级 `Validate()` 中拒绝未知
 字段、重复 key、多文档、缺失字段、非法 ID/枚举、非 UTC RFC 3339 时间、路径与文件 ID
