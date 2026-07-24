@@ -352,7 +352,7 @@ func (j *FileTaskJournal) RecoverTail(ctx context.Context, taskID string) (Recov
 	if err != nil {
 		return RecoveryReport{Before: report, BackupPath: backup}, err
 	}
-	if after.Health != Healthy {
+	if after.Health != Healthy || after.State != report.State {
 		return RecoveryReport{Before: report, After: after, BackupPath: backup}, ErrCorrupt
 	}
 	return RecoveryReport{Before: report, After: after, BackupPath: backup}, nil
@@ -393,7 +393,7 @@ func inspectJournal(data []byte, taskID string, state protocol.State) (HealthRep
 	var tail protocol.Event
 	var tailOffset int64
 	var previousAt time.Time
-	var lastStatus protocol.EventType
+	var lastStatus protocol.Event
 	lines := bytes.Split(data[:len(data)-1], []byte{'\n'})
 	for index, line := range lines {
 		lineEnd := offset + int64(len(line)+1)
@@ -404,9 +404,12 @@ func inspectJournal(data []byte, taskID string, state protocol.State) (HealthRep
 		if index == 0 && event.Type != protocol.EventTaskCreated {
 			return corruptReport(report, "first event must be task_created"), nil
 		}
+		if index > 0 && event.Type == protocol.EventTaskCreated {
+			return corruptReport(report, "task_created event must be unique"), nil
+		}
 		previousAt = event.At
 		if event.EventID <= state.LastEventID && event.Type != protocol.EventMessageAdded {
-			lastStatus = event.Type
+			lastStatus = event
 		}
 		report.EventCount++
 		report.LastEventID = event.EventID
@@ -419,7 +422,7 @@ func inspectJournal(data []byte, taskID string, state protocol.State) (HealthRep
 		return corruptReport(report, "state last_event_id does not match event log"), nil
 	}
 	if report.LastEventID == state.LastEventID {
-		if !state.UpdatedAt.Equal(previousAt) || !eventTypeMatchesState(lastStatus, state.Status) {
+		if !state.UpdatedAt.Equal(previousAt) || !eventTypeMatchesState(lastStatus.Type, state.Status) || (lastStatus.Type == protocol.EventAssigned && state.AssignedClient != lastStatus.TargetClient) {
 			return corruptReport(report, "state does not match committed event chain"), nil
 		}
 		return report, nil

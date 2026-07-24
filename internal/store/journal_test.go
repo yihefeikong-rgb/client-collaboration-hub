@@ -90,16 +90,27 @@ func TestCommitSerializesSameTask(t *testing.T) {
 }
 
 func TestInspectRejectsInvalidAuditChain(t *testing.T) {
-	journal, root := newJournal(t)
-	createTask(t, journal, "T-0001")
-	state := protocol.State{TaskID: "T-0001", Status: protocol.Draft, Version: 2, LastEventID: 2, ResponsibleClient: "codex", UpdatedAt: journalTime}
-	writeState(t, root, state)
-	events := readEvents(t, root, "T-0001")
-	events = append(events, protocol.Event{EventID: 2, TaskID: "T-0001", Type: protocol.EventMessageAdded, Actor: "codex", At: journalTime.Add(-time.Second), Body: "bad", ExpectedVersion: 1})
-	writeEvents(t, root, "T-0001", events)
-	report, err := journal.Inspect(context.Background(), "T-0001")
-	if err != nil || report.Health != Corrupt {
-		t.Fatalf("Inspect() = %+v, %v", report, err)
+	tests := []struct {
+		name  string
+		state protocol.State
+		event protocol.Event
+	}{
+		{"time moves backward", protocol.State{TaskID: "T-0001", Status: protocol.Draft, Version: 2, LastEventID: 2, ResponsibleClient: "codex", UpdatedAt: journalTime}, protocol.Event{EventID: 2, TaskID: "T-0001", Type: protocol.EventMessageAdded, Actor: "codex", At: journalTime.Add(-time.Second), Body: "bad", ExpectedVersion: 1}},
+		{"duplicate task_created", protocol.State{TaskID: "T-0001", Status: protocol.Draft, Version: 2, LastEventID: 2, ResponsibleClient: "codex", UpdatedAt: journalTime}, protocol.Event{EventID: 2, TaskID: "T-0001", Type: protocol.EventTaskCreated, Actor: "codex", At: journalTime, Body: "Test", ExpectedVersion: 1}},
+		{"assigned target differs from state", protocol.State{TaskID: "T-0001", Status: protocol.Assigned, Version: 2, LastEventID: 2, AssignedClient: "other-client", ResponsibleClient: "other-client", UpdatedAt: journalTime}, protocol.Event{EventID: 2, TaskID: "T-0001", Type: protocol.EventAssigned, Actor: "codex", At: journalTime, TargetClient: "cc-haha", ExpectedVersion: 1}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			journal, root := newJournal(t)
+			createTask(t, journal, "T-0001")
+			writeState(t, root, test.state)
+			events := append(readEvents(t, root, "T-0001"), test.event)
+			writeEvents(t, root, "T-0001", events)
+			report, err := journal.Inspect(context.Background(), "T-0001")
+			if err != nil || report.Health != Corrupt {
+				t.Fatalf("Inspect() = %+v, %v", report, err)
+			}
+		})
 	}
 }
 
