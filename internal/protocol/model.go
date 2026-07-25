@@ -35,6 +35,7 @@ type Task struct {
 type References interface {
 	ProjectExists(id string) bool
 	ClientExists(id string) bool
+	ClientHasCapability(id, capability string) bool
 }
 
 func (p Project) Validate(expectedID string) error {
@@ -65,6 +66,15 @@ func (c Client) Validate(expectedID string) error {
 		seen[capability] = true
 	}
 	return nil
+}
+
+func (c Client) HasCapability(capability string) bool {
+	for _, candidate := range c.Capabilities {
+		if candidate == capability {
+			return true
+		}
+	}
+	return false
 }
 
 func knownCapability(capability string) bool {
@@ -109,6 +119,12 @@ func (t Task) Validate(expectedID string, refs References) error {
 		if id != "" && !refs.ClientExists(id) {
 			return fmt.Errorf("unknown client %q", id)
 		}
+	}
+	if !refs.ClientHasCapability(t.Creator, "create_task") {
+		return fmt.Errorf("creator %q lacks create_task capability", t.Creator)
+	}
+	if !refs.ClientHasCapability(t.Reviewer, "review") {
+		return fmt.Errorf("reviewer %q lacks review capability", t.Reviewer)
 	}
 	return nil
 }

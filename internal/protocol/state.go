@@ -165,9 +165,7 @@ func hasSubmissionEvidence(kinds []EvidenceKind) bool {
 
 func validateEvidenceKinds(kinds []EvidenceKind) error {
 	for _, kind := range kinds {
-		switch kind {
-		case EvidenceDiff, EvidenceArtifact, EvidenceTest, EvidenceBlocker:
-		default:
+		if !isEvidenceKind(kind) {
 			return fmt.Errorf("unknown evidence kind %q", kind)
 		}
 	}

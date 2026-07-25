@@ -11,6 +11,10 @@ func (testReferences) ProjectExists(id string) bool { return id == "project-1" }
 func (testReferences) ClientExists(id string) bool {
 	return id == "codex" || id == "cc-haha"
 }
+func (testReferences) ClientHasCapability(id, capability string) bool {
+	return (id == "codex" && (capability == "create_task" || capability == "review")) ||
+		(id == "cc-haha" && capability == "execute")
+}
 
 func TestDecodeTaskStrictValidation(t *testing.T) {
 	task, err := DecodeTask([]byte(validTaskYAML), "T-0001.yaml", testReferences{})
