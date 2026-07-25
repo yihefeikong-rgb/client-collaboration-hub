@@ -235,6 +235,9 @@ func (j *FileTaskJournal) CommitTransition(ctx context.Context, taskID string, e
 	if err != nil {
 		return protocol.State{}, err
 	}
+	if intent.Action == protocol.Assign && intent.Actor == "" {
+		intent.Actor = task.Creator
+	}
 	if err := j.validateTransitionActor(intent, task, report.State); err != nil {
 		return protocol.State{}, err
 	}

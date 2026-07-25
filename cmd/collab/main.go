@@ -1,7 +1,11 @@
 package main
 
-import "fmt"
+import (
+	"os"
+
+	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/cli"
+)
 
 func main() {
-	fmt.Println("collab: protocol CLI skeleton; commands will be added in the next phase")
+	os.Exit(cli.NewApp(".", os.Stdout, os.Stderr, nil).Run(os.Args[1:]))
 }
