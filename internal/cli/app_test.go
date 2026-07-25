@@ -106,3 +106,68 @@ func TestExitCodesAndOutcomeUnknownGuidance(t *testing.T) {
 		t.Fatal("sentinel regression")
 	}
 }
+
+func TestCLIAuxiliaryCommandsAndFailures(t *testing.T) {
+	root := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := NewApp(root, &stdout, &stderr, func() time.Time { return time.Date(2026, 7, 25, 1, 0, 0, 0, time.UTC) })
+	run := func(want int, args ...string) {
+		t.Helper()
+		stdout.Reset()
+		stderr.Reset()
+		if code := app.Run(args); code != want {
+			t.Fatalf("%v: code=%d want=%d stderr=%s", args, code, want, stderr.String())
+		}
+	}
+	run(ExitOK, "init")
+	run(ExitOK, "client", "register", "--id", "codex", "--name", "Codex", "--capability", "create_task", "--capability", "review")
+	run(ExitValidation, "client", "register", "--id", "codex", "--name", "Codex", "--capability", "review")
+	run(ExitOK, "client", "register", "--id", "cc-haha", "--name", "CC-HAHA", "--capability", "execute")
+	run(ExitOK, "project", "create", "--id", "project-1", "--name", "Demo")
+	run(ExitOK, "task", "create", "--id", "T-0002", "--project", "project-1", "--title", "Block task", "--objective", "Test block", "--acceptance", "Pass", "--creator", "codex")
+	run(ExitOK, "message", "add", "--task", "T-0002", "--actor", "codex", "--body", "Created", "--expected-version", "1")
+	run(ExitConflict, "task", "assign", "--task", "T-0002", "--client", "cc-haha", "--expected-version", "1")
+	run(ExitOK, "task", "assign", "--task", "T-0002", "--client", "cc-haha", "--expected-version", "2")
+	run(ExitValidation, "evidence", "add", "--task", "T-0002", "--id", "E-bad", "--kind", "invalid", "--summary", "Bad", "--created-by", "cc-haha", "--expected-version", "3")
+	run(ExitOK, "evidence", "add", "--task", "T-0002", "--id", "E-block", "--kind", "blocker", "--summary", "Blocked", "--created-by", "cc-haha", "--expected-version", "3")
+	run(ExitOK, "task", "block", "--task", "T-0002", "--actor", "cc-haha", "--evidence", "E-block", "--expected-version", "4")
+	run(ExitOK, "recover", "--task", "T-0002")
+}
+
+func TestCLIStatusAndRecoverHandleRecoverableTail(t *testing.T) {
+	root := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := NewApp(root, &stdout, &stderr, func() time.Time { return time.Date(2026, 7, 25, 2, 0, 0, 0, time.UTC) })
+	run := func(want int, args ...string) {
+		t.Helper()
+		stdout.Reset()
+		stderr.Reset()
+		if code := app.Run(args); code != want {
+			t.Fatalf("%v: code=%d want=%d stderr=%s", args, code, want, stderr.String())
+		}
+	}
+	run(ExitOK, "init")
+	run(ExitOK, "client", "register", "--id", "codex", "--name", "Codex", "--capability", "create_task", "--capability", "review")
+	run(ExitOK, "client", "register", "--id", "cc-haha", "--name", "CC-HAHA", "--capability", "execute")
+	run(ExitOK, "project", "create", "--id", "project-1", "--name", "Demo")
+	run(ExitOK, "task", "create", "--id", "T-0003", "--project", "project-1", "--title", "Recover task", "--objective", "Recover", "--acceptance", "Pass", "--creator", "codex")
+	journal := app.Journal.(*store.FileTaskJournal)
+	journal.Replacer = cliFailingReplacer{}
+	run(ExitInternal, "task", "assign", "--task", "T-0003", "--client", "cc-haha", "--expected-version", "1")
+	journal.Replacer = cliOSReplacer{}
+	run(ExitRecovery, "status", "--task", "T-0003")
+	run(ExitOK, "recover", "--task", "T-0003")
+	run(ExitOK, "status", "--task", "T-0003")
+}
+
+type cliFailingReplacer struct{}
+
+func (cliFailingReplacer) Replace(_, path string) error {
+	return &os.PathError{Op: "rename", Path: path, Err: errors.New("replace failed")}
+}
+
+type cliOSReplacer struct{}
+
+func (cliOSReplacer) Replace(tempPath, targetPath string) error {
+	return os.Rename(tempPath, targetPath)
+}

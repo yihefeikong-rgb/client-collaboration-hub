@@ -137,7 +137,10 @@ func ensureGitignore(path string) error {
 		appendix += "\n"
 	}
 	appendix += strings.Join(missing, "\n") + "\n"
-	_, writeErr := io.WriteString(file, appendix)
+	n, writeErr := io.WriteString(file, appendix)
+	if writeErr == nil && n != len(appendix) {
+		writeErr = io.ErrShortWrite
+	}
 	if writeErr == nil {
 		writeErr = file.Sync()
 	}

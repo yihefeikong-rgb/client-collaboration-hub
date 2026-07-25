@@ -2,65 +2,51 @@
 
 ## 范围与非目标
 
-Protocol v1 定义独立客户端之间可审计、可迁移的文件协作协议。Codex、CC-HAHA
-保留各自的 UI、会话、登录态、技能和 MCP；中枢只保存任务、事件、证据、审查
-与交接信息。
+Protocol v1 是独立客户端间可审计、可迁移的文件协作协议。Codex、CC-HAHA 等客户端保留
+各自的 UI、会话、登录态、技能和 MCP；协作中枢只保存逻辑项目、客户端、任务、事件和
+证据。当前不实现 AO、ConPTY、sidecar、GUI、handoff、binding 命令或客户端自动控制。
 
-本版本不接入 AO、ConPTY、sidecar、GUI 或客户端自动控制；不执行 commit、push
-或 merge。绝对路径、PID、PTY、客户端会话 ID 与本地凭据不得写入可迁移数据。
+绝对路径、PID、PTY、客户端会话 ID 与本地凭据不得进入可迁移数据。
 
-## 仓库与数据布局
+## 布局与 Registry
 
 ```text
-client-collaboration-hub/
-  docs/specs/
-  docs/plans/
-  collaboration/
-    projects/<project-id>.yaml
-    clients/<client-id>.yaml
-    tasks/<task-id>/task.yaml
-    tasks/<task-id>/state.json
-    tasks/<task-id>/messages.jsonl
-    tasks/<task-id>/evidence/<evidence-id>.json
-    tasks/<task-id>/handoff.md
-    bindings/<device-id>/<project-id>.local.json  # .gitignore，不可迁移
-    .runtime/locks/tasks/<task-id>.lock           # .gitignore，不可迁移
+collaboration/
+  projects/<project-id>.yaml
+  clients/<client-id>.yaml
+  tasks/<task-id>/task.yaml
+  tasks/<task-id>/state.json
+  tasks/<task-id>/messages.jsonl
+  tasks/<task-id>/evidence/<evidence-id>.json
+  bindings/                         # 预留且 .gitignore
+  .runtime/                         # 锁与 recovery，.gitignore
 ```
 
-`collaboration/` 的任务数据可进入 Git；`bindings/` 是设备本地映射，必须忽略。
-逻辑项目以 `project-id` 标识，换设备后重新 bind，不修改任务文件。
+项目和客户端由 `RegistryStore` 原子创建：目标同目录临时文件完整写入、Sync、Close 后再
+替换，已有 ID 一律拒绝覆盖。YAML 使用严格已知字段、单文档和重复 key 校验。
 
-## 核心模型
+任务创建必须确认 project、creator 与 reviewer 都已注册；creator 必须有 `create_task`，
+reviewer 必须有 `review` capability。`task.created_at` 是唯一创建时间真源。
 
-`task.yaml`：`id`、`project_id`、`title`、`objective`、`acceptance`、`creator`、
-`reviewer`、`created_at`。创建时 `reviewer` 默认等于 `creator`，可显式
-指定；创建后不可更改 `id` 与 `project_id`。
+## 任务、State 与 Evidence
 
-`state.json`：
+`task.yaml` 固定保存 `id`、`project_id`、`title`、`objective`、`acceptance`、`creator`、
+`reviewer` 与 UTC `created_at`。`reviewer` 默认等于 creator。
 
-```json
-{
-  "task_id": "T-0001",
-  "status": "ASSIGNED",
-  "version": 4,
-  "last_event_id": 4,
-  "assigned_client": "cc-haha",
-  "responsible_client": "cc-haha",
-  "updated_at": "2026-07-24T14:00:00Z"
-}
+`state.json` 保存业务状态、版本、最后事件、assigned/responsible client 与 UTC
+`updated_at`。任务建立后始终满足：
+
+```text
+state.version == state.last_event_id
+event.event_id == event.expected_version + 1
 ```
 
-`messages.jsonl` 的每行均为事件，最小字段为 `event_id`（严格递增）、`type`、
-`actor`、`at`、`body`、`evidence_refs`、`expected_version`。禁止修改或删除既有行。
+Evidence 是不可变 JSON，字段为 `id`、`task_id`、`kind` (`diff`、`artifact`、`test`、
+`blocker`)、`summary`、`file_refs`、`created_by`、`created_at`。JSON 严格拒绝未知字段；
+file refs 不能包含本机绝对路径、重复项或疑似凭据。相同 ID 的相同内容幂等，不同内容冲突。
+合法但尚未被事件引用的 Evidence 是允许的孤立事实，不会使 Journal 损坏。
 
-`evidence/<id>.json` 包含 `id`、`task_id`、`kind`（`diff`、`test`、`artifact`、
-`blocker`）、`summary`、`files`、`created_by`、`created_at`。被提交或审查引用时，
-证据文件必须已存在且 `task_id` 匹配。
-
-`handoff.md` 是人可直接阅读的自包含交接包：任务目标、当前状态、责任方、未读事件、
-证据索引、下一步命令。它是导出物，不是状态真源。
-
-## 状态机
+## 状态机与事件
 
 ```text
 DRAFT -> ASSIGNED -> WORKING -> REVIEW -> DONE
@@ -68,96 +54,37 @@ DRAFT -> ASSIGNED -> WORKING -> REVIEW -> DONE
               \-------------------------------> BLOCKED
 ```
 
-| 转换 | 前置条件 | 写入事件 |
+| 转换 | 事件 | 权限与证据 |
 | --- | --- | --- |
-| create: `DRAFT` | 新 task ID，项目存在 | `task_created` |
-| assign: `DRAFT/BLOCKED -> ASSIGNED` | 创建者、目标客户端已注册 | `assigned` |
-| accept: `ASSIGNED -> WORKING` | 当前责任方 | `accepted` |
-| submit: `WORKING -> REVIEW` | 当前责任方；至少一个 `diff` 或 `artifact`，且至少一个 `test` 证据 | `submitted` |
-| request-changes: `REVIEW -> REVISION_REQUIRED` | `reviewer`；非空反馈 | `changes_requested` |
-| resume: `REVISION_REQUIRED -> WORKING` | 当前责任方 | `revision_started` |
-| approve: `REVIEW -> DONE` | `reviewer` | `approved` |
-| block: `ASSIGNED/WORKING/REVIEW -> BLOCKED` | 当前责任方或创建者；`blocker` 证据 | `blocked` |
+| create | `task_created` | creator；第一条事件，ID 1，expected version 0 |
+| assign | `assigned` | creator，记录 target_client |
+| accept | `accepted` | assigned executor |
+| submit | `submitted` | executor；真实 Evidence 至少有 diff/artifact 和 test |
+| request changes | `changes_requested` | reviewer；body 为非空反馈 |
+| resume | `revision_started` | executor |
+| approve | `approved` | reviewer |
+| block | `blocked` | creator 或责任方；真实 blocker Evidence |
 
-除表中转换外一律拒绝。`BLOCKED` 不能隐式恢复；创建者重新 assign 后才进入
-`ASSIGNED`。
+`message_added` 和 `evidence_added` 都是版本事件：递增 version、last_event_id 与
+updated_at，但不改变业务 status、assigned_client 或 responsible_client。
+`evidence_added` 必须恰好引用一份同任务 Evidence，body 等于其 summary，actor 与
+created_by 一致。
 
-动态指派只存在于 `state.json` 和事件，不存在于 `task.yaml`。责任字段的固定语义为：
+## 事务、Replay 与恢复
 
-| 状态 | `assigned_client` | `responsible_client` |
-| --- | --- | --- |
-| `DRAFT` | 空 | `creator` |
-| `ASSIGNED`、`WORKING` | 执行者 | 执行者 |
-| `REVIEW`、`DONE` | 执行者 | `reviewer` |
-| `REVISION_REQUIRED` | 执行者 | 执行者 |
-| `BLOCKED` | 保留 | 保留阻塞前责任方 |
-
-## 原子性与并发
-
-正式变更只能由 CLI 完成。锁文件位于 `.runtime/locks/`：任务使用
-`tasks/<task-id>.lock`，项目使用 `projects.lock`，客户端使用 `clients.lock`。持锁后必须
-重新读取状态、检查 `--expected-version`、校验证据并写入；禁止全仓库锁。锁阻止同时通过版本检查，乐观锁拒绝
-基于旧状态的调用。
-
-每个 v1 任务由 `TaskJournal.CreateTask` 原子建立：`task.yaml`、`state.json` 与
-`messages.jsonl` 一起发布。第一条事件必须是 `task_created`（ID 1、expected version 0）；
-初始 DRAFT State 的 version 与 last_event_id 都是 1，责任方为 creator。
-
-MVP 保留 JSONL，且 `TaskJournal` 是事件与状态的唯一事务写入口。公开写接口只接收
-任务创建、`TransitionRequest` 或消息意图；Event 和 next State 由 Journal 内部推导。成功写入顺序为：
-持任务锁并 Inspect → 校验版本和不变量 → 追加一条完整事件并 Sync → 将新 state 写入
-同目录临时文件并 Sync/Close → 经 `AtomicReplacer` 原子替换 → 重新 Inspect。调用方不能
-自行追加 JSONL 或单独保存 State。
-
-健康状态为 `HEALTHY`、`RECOVERABLE_TAIL` 与 `CORRUPT`。只有“恰好多一条完整尾部
-事件、ID 为 `last_event_id + 1`、expected version 等于当前 state version”可由 `recover`
-在备份后截断。JSONL 行不完整、多出多条事件、ID 不连续、state 超前、非法 JSON 或任务
-ID 不一致时为只读 `CORRUPT`；它不是业务状态，CLI 不得猜测修复。备份写入设备本地的
-`.runtime/recovery/`。实现已在 Windows 与 Unix CI 测试原子替换，但不承诺任意文件系统
-在断电情形都具备相同持久性。CLI 不提供人工 JSON 编辑入口。
-
-每一条正式 Event 均递增 State 的 version 和 last_event_id；任务创建后始终满足
-`state.version == state.last_event_id` 及 `event.event_id == event.expected_version + 1`。
-Inspect 同时验证第一条 task_created、连续版本、时间不倒退以及 State 与最后已提交事件
-的一致性。若替换已成功但最终复验无法确认结果，Journal 返回 `ErrCommitOutcomeUnknown`；
-调用方必须先 Inspect，不得盲目重试。
-
-YAML 以 `yaml.v3` 的 `KnownFields(true)` 解码，并在模型级 `Validate()` 中拒绝未知
-字段、重复 key、多文档、缺失字段、非法 ID/枚举、非 UTC RFC 3339 时间、路径与文件 ID
-不一致、受支持前缀的本地文件系统路径，以及 PID、PTY、session ID 或疑似凭据字段。
-受支持的 Unix 本地路径前缀为 `/home/`、`/Users/`、`/root/`、`/tmp/`、`/var/`、`/etc/`、
-`/opt/`、`/usr/`、`/mnt/`、`/srv/` 与 `/workspace/`；Windows 盘符、UNC、`~/` 与
-`file://` 也被拒绝。逻辑路由如 `/health` 与 `/api/v1/tasks` 不是本地路径。任务还必须
-验证项目和客户端引用存在。
-
-## 客户端适配器
-
-基础适配器只处理可人工携带的交接包，不能假装中枢能控制客户端：
+公共 `TaskJournal` 写接口只接受 `Task`、`TransitionIntent`、消息意图或 `Evidence`；调用方
+不能传 Event、next State、event ID、expected version 或 EvidenceKinds。Journal 在任务锁中：
 
 ```text
-ClientAdapter
-  client_id() -> stable logical id
-  capabilities() -> declared capabilities
-  export_assignment(task_ref) -> delivery_package
-  import_events(client_output) -> validated events
-  recover(cursor) -> unread events and state
+Inspect -> 校验 expected version -> 读取真实 Evidence -> 派生 kinds
+-> 推导 Event/State -> append+Sync -> 原子 State 替换 -> Replay 复验
 ```
 
-`ManualCodexAdapter` 与 `ManualCCHahaAdapter` 都实现基础接口：导出一段可粘贴的
-任务指令和 `handoff.md`，再将客户端给出的结构化结果交给 CLI 校验并写入。
+`Replay` 从首条 `task_created` 重建 State，逐条验证 Event ID、expected version、时间、
+注册客户端、角色 capability、状态机转换、Evidence 引用和非业务事件。最终重建结果必须与
+`state.json` 完全相等；任何非法中间顺序（例如 task_created 后 approve）均为 `CORRUPT`。
 
-只有经实际验证的自动化通道才可额外实现：
-
-```text
-ActiveClientAdapter
-  deliver(task_ref) -> accepted | unavailable
-```
-
-未来 `CodexDesktopAdapter`、`CCHahaSidecarAdapter` 只能在实现并验证相应通道后加入，
-且不改变 v1 数据或状态机。
-
-## v1 演示闭环
-
-`T-0001` 必须覆盖：Codex 创建 → 指派 CC-HAHA → 导出 CC-HAHA 交接包 → 写回结果、
-diff、测试和说明 → Codex 要求返工一次 → CC-HAHA 修订 → Codex 审批 DONE → 在新
-本地路径重新绑定同一项目并 recover。全程不启动 sidecar 或 AO。
+不存在整个任务目录返回 `ErrTaskNotFound`；目录存在但任务文件缺失或非法为 `CORRUPT`。
+唯一完整、连续且尚未提交的尾事件是 `RECOVERABLE_TAIL`。`recover` 先完整备份再截断，且
+必须证明恢复后的 State 与恢复前相同。替换已成功但最终 Replay 无法确认时返回
+`ErrCommitOutcomeUnknown`；调用方必须先 Inspect，不能直接重试。

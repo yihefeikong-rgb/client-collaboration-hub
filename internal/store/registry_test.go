@@ -53,6 +53,19 @@ func TestRegistryRejectsInvalidStoredYAML(t *testing.T) {
 	}
 }
 
+func TestRegistryDoesNotPublishShortWrite(t *testing.T) {
+	root := t.TempDir()
+	registry := NewFileRegistryStore(root, FlockLocker{})
+	registry.FS = &faultFS{partialTemp: true}
+	project := protocol.Project{ID: "project-1", Name: "Demo", CreatedAt: journalTime}
+	if err := registry.CreateProject(context.Background(), project); err == nil {
+		t.Fatal("short project write accepted")
+	}
+	if _, err := os.Stat(filepath.Join(root, "projects", "project-1.yaml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("published short project: %v", err)
+	}
+}
+
 func TestCreateTaskRequiresRegisteredReferences(t *testing.T) {
 	root := t.TempDir()
 	registry := NewFileRegistryStore(root, FlockLocker{})

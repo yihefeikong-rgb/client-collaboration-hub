@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -26,6 +27,9 @@ func TestCreateTaskCreatesAuditableInitialState(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "tasks", "T-0001", "task.yaml")); err != nil {
 		t.Fatal(err)
+	}
+	if event := readEvents(t, root, "T-0001")[0]; !event.At.Equal(testTask("T-0001").CreatedAt) || event.Type != protocol.EventTaskCreated {
+		t.Fatalf("initial event = %+v", event)
 	}
 	if err := journal.CreateTask(context.Background(), testTask("T-0001")); err == nil {
 		t.Fatal("duplicate task accepted")
@@ -84,6 +88,24 @@ func TestAddEvidenceDerivesSubmissionKindsAndPreservesBusinessState(t *testing.T
 	next, err = journal.CommitTransition(context.Background(), "T-0001", 5, protocol.TransitionIntent{Action: protocol.Submit, Actor: "cc-haha", At: journalTime}, []string{"E-diff", "E-test"})
 	if err != nil || next.Status != protocol.Review || next.Version != 6 {
 		t.Fatalf("CommitTransition() = %+v, %v", next, err)
+	}
+}
+
+func TestAddEvidenceCanResumeFromOrphanAfterRecovery(t *testing.T) {
+	journal, _ := newJournal(t)
+	createTask(t, journal, "T-0001")
+	evidence := protocol.Evidence{ID: "E-0001", TaskID: "T-0001", Kind: protocol.EvidenceDiff, Summary: "Diff", CreatedBy: "codex", CreatedAt: journalTime}
+	journal.Replacer = failingReplacer{}
+	if _, err := journal.AddEvidence(context.Background(), "T-0001", 1, evidence); err == nil {
+		t.Fatal("replace failure accepted")
+	}
+	journal.Replacer = osReplacer{}
+	if _, err := journal.RecoverTail(context.Background(), "T-0001"); err != nil {
+		t.Fatal(err)
+	}
+	next, err := journal.AddEvidence(context.Background(), "T-0001", 1, evidence)
+	if err != nil || next.Version != 2 || next.Status != protocol.Draft {
+		t.Fatalf("AddEvidence() = %+v, %v", next, err)
 	}
 }
 
@@ -243,13 +265,24 @@ func TestCommitReturnsOutcomeUnknownAfterReplace(t *testing.T) {
 	}
 }
 
+func TestCreateTaskDoesNotPublishHalfInitializedDirectory(t *testing.T) {
+	journal, root := newJournal(t)
+	journal.FS = &faultFS{partialNew: true}
+	if err := journal.CreateTask(context.Background(), testTask("T-0001")); err == nil {
+		t.Fatal("short task initialization write accepted")
+	}
+	if _, err := os.Stat(filepath.Join(root, "tasks", "T-0001")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("published half-initialized task: %v", err)
+	}
+}
+
 type failingReplacer struct{}
 
 func (failingReplacer) Replace(string, string) error { return errors.New("replace failed") }
 
 type faultFS struct {
 	osFileSystem
-	partialTemp, partialBackup, failRead bool
+	partialTemp, partialNew, partialBackup, failRead bool
 }
 
 func (fs *faultFS) ReadFile(path string) ([]byte, error) {
@@ -268,7 +301,9 @@ func (fs *faultFS) OpenFile(path string, flag int, perm os.FileMode) (SyncFile, 
 	if err != nil {
 		return nil, err
 	}
-	return &faultFile{SyncFile: file, partial: fs.partialBackup && filepath.Base(filepath.Dir(path)) != "T-0001"}, nil
+	parent := filepath.Base(filepath.Dir(path))
+	partial := (fs.partialBackup && parent != "T-0001") || (fs.partialNew && strings.HasPrefix(parent, ".task-"))
+	return &faultFile{SyncFile: file, partial: partial}, nil
 }
 func (fs *faultFS) disableFaults() { *fs = faultFS{} }
 
