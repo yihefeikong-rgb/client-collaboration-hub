@@ -35,7 +35,7 @@ func TestCreateTaskCreatesAuditableInitialState(t *testing.T) {
 func TestCommitTransitionDerivesEventAndState(t *testing.T) {
 	journal, _ := newJournal(t)
 	createTask(t, journal, "T-0001")
-	next, err := journal.CommitTransition(context.Background(), "T-0001", 1, protocol.TransitionRequest{Action: protocol.Assign, Actor: "codex", NextAssignee: "cc-haha", At: journalTime}, nil)
+	next, err := journal.CommitTransition(context.Background(), "T-0001", 1, protocol.TransitionIntent{Action: protocol.Assign, Actor: "codex", NextAssignee: "cc-haha", At: journalTime}, nil)
 	if err != nil || next.Status != protocol.Assigned || next.Version != 2 || next.AssignedClient != "cc-haha" {
 		t.Fatalf("CommitTransition() = %+v, %v", next, err)
 	}
@@ -43,7 +43,7 @@ func TestCommitTransitionDerivesEventAndState(t *testing.T) {
 	if event.Type != protocol.EventAssigned || event.TargetClient != "cc-haha" || event.EventID != 2 || event.ExpectedVersion != 1 {
 		t.Fatalf("event = %+v", event)
 	}
-	if _, err := journal.CommitTransition(context.Background(), "T-0001", 2, protocol.TransitionRequest{Action: protocol.Approve, Actor: "codex", At: journalTime}, nil); err == nil {
+	if _, err := journal.CommitTransition(context.Background(), "T-0001", 2, protocol.TransitionIntent{Action: protocol.Approve, Actor: "codex", At: journalTime}, nil); err == nil {
 		t.Fatal("illegal transition accepted")
 	}
 }
@@ -57,6 +57,74 @@ func TestAppendMessagePreservesBusinessState(t *testing.T) {
 	}
 	if event := readEvents(t, journal.Root, "T-0001")[1]; event.Type != protocol.EventMessageAdded || event.Body != "hello" {
 		t.Fatalf("event = %+v", event)
+	}
+}
+
+func TestAddEvidenceDerivesSubmissionKindsAndPreservesBusinessState(t *testing.T) {
+	journal, _ := newJournal(t)
+	createTask(t, journal, "T-0001")
+	diff := protocol.Evidence{ID: "E-diff", TaskID: "T-0001", Kind: protocol.EvidenceDiff, Summary: "Diff", CreatedBy: "codex", CreatedAt: journalTime}
+	next, err := journal.AddEvidence(context.Background(), "T-0001", 1, diff)
+	if err != nil || next.Status != protocol.Draft || next.Version != 2 || next.LastEventID != 2 {
+		t.Fatalf("AddEvidence() = %+v, %v", next, err)
+	}
+	testEvidence := protocol.Evidence{ID: "E-test", TaskID: "T-0001", Kind: protocol.EvidenceTest, Summary: "Tests", CreatedBy: "codex", CreatedAt: journalTime}
+	if _, err := journal.AddEvidence(context.Background(), "T-0001", 2, testEvidence); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.CommitTransition(context.Background(), "T-0001", 3, protocol.TransitionIntent{Action: protocol.Assign, Actor: "codex", NextAssignee: "cc-haha", At: journalTime}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.CommitTransition(context.Background(), "T-0001", 4, protocol.TransitionIntent{Action: protocol.Accept, Actor: "cc-haha", At: journalTime}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.CommitTransition(context.Background(), "T-0001", 5, protocol.TransitionIntent{Action: protocol.Submit, Actor: "cc-haha", At: journalTime}, []string{"E-missing"}); err == nil {
+		t.Fatal("missing evidence accepted")
+	}
+	next, err = journal.CommitTransition(context.Background(), "T-0001", 5, protocol.TransitionIntent{Action: protocol.Submit, Actor: "cc-haha", At: journalTime}, []string{"E-diff", "E-test"})
+	if err != nil || next.Status != protocol.Review || next.Version != 6 {
+		t.Fatalf("CommitTransition() = %+v, %v", next, err)
+	}
+}
+
+func TestAppendMessageRejectsUnrelatedClient(t *testing.T) {
+	journal, root := newJournal(t)
+	registry := NewFileRegistryStore(root, FlockLocker{})
+	if err := registry.RegisterClient(context.Background(), protocol.Client{ID: "observer", Name: "Observer", Capabilities: []string{"import_export"}}); err != nil {
+		t.Fatal(err)
+	}
+	createTask(t, journal, "T-0001")
+	if _, err := journal.AppendMessage(context.Background(), "T-0001", 1, "observer", "hello", journalTime); err == nil {
+		t.Fatal("unrelated client message accepted")
+	}
+}
+
+func TestInspectAllowsUnreferencedEvidenceAndSeparatesMissingTask(t *testing.T) {
+	journal, _ := newJournal(t)
+	createTask(t, journal, "T-0001")
+	evidence := protocol.Evidence{ID: "E-0001", TaskID: "T-0001", Kind: protocol.EvidenceDiff, Summary: "Orphan", CreatedBy: "codex", CreatedAt: journalTime}
+	if _, err := journal.Evidence.EnsureEvidence(context.Background(), evidence); err != nil {
+		t.Fatal(err)
+	}
+	report, err := journal.Inspect(context.Background(), "T-0001")
+	if err != nil || report.Health != Healthy {
+		t.Fatalf("Inspect() = %+v, %v", report, err)
+	}
+	if _, err := journal.Inspect(context.Background(), "T-404"); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("missing task error = %v", err)
+	}
+}
+
+func TestInspectReplayRejectsIllegalHistory(t *testing.T) {
+	journal, root := newJournal(t)
+	createTask(t, journal, "T-0001")
+	state := protocol.State{TaskID: "T-0001", Status: protocol.Done, Version: 2, LastEventID: 2, AssignedClient: "cc-haha", ResponsibleClient: "codex", UpdatedAt: journalTime}
+	writeState(t, root, state)
+	events := append(readEvents(t, root, "T-0001"), protocol.Event{EventID: 2, TaskID: "T-0001", Type: protocol.EventApproved, Actor: "codex", At: journalTime, ExpectedVersion: 1})
+	writeEvents(t, root, "T-0001", events)
+	report, err := journal.Inspect(context.Background(), "T-0001")
+	if err != nil || report.Health != Corrupt {
+		t.Fatalf("Inspect() = %+v, %v", report, err)
 	}
 }
 
@@ -118,7 +186,7 @@ func TestRecoverTailRestoresPriorState(t *testing.T) {
 	journal, _ := newJournal(t)
 	createTask(t, journal, "T-0001")
 	journal.Replacer = failingReplacer{}
-	_, err := journal.CommitTransition(context.Background(), "T-0001", 1, protocol.TransitionRequest{Action: protocol.Assign, Actor: "codex", NextAssignee: "cc-haha", At: journalTime}, nil)
+	_, err := journal.CommitTransition(context.Background(), "T-0001", 1, protocol.TransitionIntent{Action: protocol.Assign, Actor: "codex", NextAssignee: "cc-haha", At: journalTime}, nil)
 	if err == nil {
 		t.Fatal("replace failure accepted")
 	}
@@ -239,7 +307,7 @@ func newJournal(t *testing.T) (*FileTaskJournal, string) {
 	if err := registry.RegisterClient(context.Background(), protocol.Client{ID: "cc-haha", Name: "CC-HAHA", Capabilities: []string{"execute"}}); err != nil {
 		t.Fatal(err)
 	}
-	return NewFileTaskJournal(root, FlockLocker{}, registry), root
+	return NewFileTaskJournal(root, FlockLocker{}, registry, NewFileEvidenceStore(root)), root
 }
 func createTask(t *testing.T, journal *FileTaskJournal, taskID string) {
 	t.Helper()

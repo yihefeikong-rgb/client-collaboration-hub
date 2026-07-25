@@ -56,7 +56,7 @@ func TestRegistryRejectsInvalidStoredYAML(t *testing.T) {
 func TestCreateTaskRequiresRegisteredReferences(t *testing.T) {
 	root := t.TempDir()
 	registry := NewFileRegistryStore(root, FlockLocker{})
-	journal := NewFileTaskJournal(root, FlockLocker{}, registry)
+	journal := NewFileTaskJournal(root, FlockLocker{}, registry, NewFileEvidenceStore(root))
 	task := protocol.Task{ID: "T-0001", ProjectID: "project-1", Title: "Test", Objective: "Test", Acceptance: []string{"Pass"}, Creator: "codex", Reviewer: "codex", CreatedAt: time.Date(2026, 7, 25, 0, 0, 0, 0, time.UTC)}
 	if err := journal.CreateTask(context.Background(), task); err == nil {
 		t.Fatal("unknown references accepted")
