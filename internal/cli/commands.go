@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/handoff"
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/protocol"
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/store"
 )
@@ -32,6 +33,10 @@ func (a *App) run(ctx context.Context, args []string, jsonOutput bool) (int, err
 		return a.clientRegister(ctx, args[2:], jsonOutput)
 	case matches(args, "project", "create"):
 		return a.projectCreate(ctx, args[2:], jsonOutput)
+	case matches(args, "project", "bind"):
+		return a.projectBind(ctx, args[2:], jsonOutput)
+	case matches(args, "project", "binding-status"):
+		return a.projectBindingStatus(ctx, args[2:], jsonOutput)
 	case matches(args, "task", "create"):
 		return a.taskCreate(ctx, args[2:], jsonOutput)
 	case matches(args, "task", "assign"):
@@ -56,6 +61,8 @@ func (a *App) run(ctx context.Context, args []string, jsonOutput bool) (int, err
 		return a.status(ctx, args[1:], jsonOutput)
 	case matches(args, "recover"):
 		return a.recover(ctx, args[1:], jsonOutput)
+	case matches(args, "handoff", "export"):
+		return a.handoffExport(ctx, args[2:], jsonOutput)
 	default:
 		return ExitValidation, errUsage
 	}
@@ -195,6 +202,44 @@ func (a *App) projectCreate(ctx context.Context, args []string, jsonOutput bool)
 	return ExitOK, nil
 }
 
+func (a *App) projectBind(ctx context.Context, args []string, jsonOutput bool) (int, error) {
+	fs := newFlagSet("project bind")
+	project := fs.String("project", "", "")
+	device := fs.String("device", "", "")
+	localPath := fs.String("path", "", "")
+	revision := fs.String("revision", "", "")
+	if err := parse(fs, args); err != nil {
+		return ExitValidation, err
+	}
+	if err := require("project", *project, "device", *device, "path", *localPath); err != nil {
+		return ExitValidation, errUsage
+	}
+	binding := store.ProjectBinding{DeviceID: *device, ProjectID: *project, LocalPath: *localPath, Revision: *revision, BoundAt: a.now()}
+	if err := a.Bindings.BindProject(ctx, binding); err != nil {
+		return exitCode(err), err
+	}
+	a.writeBinding(jsonOutput, binding.ProjectID, binding.DeviceID, binding.Revision, true)
+	return ExitOK, nil
+}
+
+func (a *App) projectBindingStatus(ctx context.Context, args []string, jsonOutput bool) (int, error) {
+	fs := newFlagSet("project binding-status")
+	project := fs.String("project", "", "")
+	device := fs.String("device", "", "")
+	if err := parse(fs, args); err != nil {
+		return ExitValidation, err
+	}
+	if err := require("project", *project, "device", *device); err != nil {
+		return ExitValidation, errUsage
+	}
+	binding, err := a.Bindings.ReadBinding(ctx, *device, *project)
+	if err != nil {
+		return exitCode(err), err
+	}
+	a.writeBinding(jsonOutput, binding.ProjectID, binding.DeviceID, binding.Revision, a.Bindings.BindingAvailable(ctx, binding.DeviceID, binding.ProjectID))
+	return ExitOK, nil
+}
+
 func (a *App) taskCreate(ctx context.Context, args []string, jsonOutput bool) (int, error) {
 	fs := newFlagSet("task create")
 	id := fs.String("id", "", "")
@@ -294,29 +339,37 @@ func (a *App) evidenceAdd(ctx context.Context, args []string, jsonOutput bool) (
 		return ExitValidation, errUsage
 	}
 	evidence := protocol.Evidence{ID: *id, TaskID: *task, Kind: protocol.EvidenceKind(*kind), Summary: *summary, FileRefs: refs, CreatedBy: *createdBy, CreatedAt: a.now()}
-	state, err := a.Journal.AddEvidence(ctx, *task, *expected, evidence)
+	result, err := a.Journal.AddEvidence(ctx, *task, *expected, evidence)
 	if err != nil {
 		return exitCode(err), err
 	}
-	a.writeState(jsonOutput, state)
+	a.writeEvidenceResult(jsonOutput, result)
 	return ExitOK, nil
 }
 
 func (a *App) status(ctx context.Context, args []string, jsonOutput bool) (int, error) {
 	fs := newFlagSet("status")
 	task := fs.String("task", "", "")
+	device := fs.String("device", "", "")
 	if err := parse(fs, args); err != nil {
 		return ExitValidation, err
 	}
 	if err := require("task", *task); err != nil {
 		return ExitValidation, errUsage
 	}
-	report, err := a.Journal.Inspect(ctx, *task)
+	if *device != "" && !protocol.IsValidID(*device) {
+		return ExitValidation, errUsage
+	}
+	snapshot, err := a.Query.Snapshot(ctx, *task, 0)
 	if err != nil {
 		return exitCode(err), err
 	}
-	a.writeHealth(jsonOutput, report)
-	switch report.Health {
+	bindingAvailable := false
+	if *device != "" && snapshot.Project.ID != "" {
+		bindingAvailable = a.Bindings.BindingAvailable(ctx, *device, snapshot.Project.ID)
+	}
+	a.writeSnapshotHealth(jsonOutput, snapshot, bindingAvailable)
+	switch snapshot.Health {
 	case store.Healthy:
 		return ExitOK, nil
 	case store.RecoverableTail:
@@ -324,6 +377,33 @@ func (a *App) status(ctx context.Context, args []string, jsonOutput bool) (int, 
 	default:
 		return ExitCorrupt, nil
 	}
+}
+
+func (a *App) handoffExport(ctx context.Context, args []string, jsonOutput bool) (int, error) {
+	fs := newFlagSet("handoff export")
+	task := fs.String("task", "", "")
+	client := fs.String("client", "", "")
+	adapter := fs.String("adapter", "", "")
+	device := fs.String("device", "", "")
+	afterEvent := fs.Int64("after-event", -1, "")
+	output := fs.String("output", "", "")
+	force := fs.Bool("force", false, "")
+	if err := parse(fs, args); err != nil {
+		return ExitValidation, err
+	}
+	if err := require("task", *task, "client", *client, "adapter", *adapter, "device", *device, "output", *output); err != nil || *afterEvent < 0 {
+		return ExitValidation, errUsage
+	}
+	outputPath := *output
+	if !filepath.IsAbs(outputPath) {
+		outputPath = filepath.Join(a.Root, outputPath)
+	}
+	report, err := a.Handoff.Export(ctx, handoff.ExportOptions{TaskID: *task, ClientID: *client, Adapter: *adapter, DeviceID: *device, AfterEventID: *afterEvent, OutputDir: outputPath, Force: *force})
+	if err != nil {
+		return exitCode(err), err
+	}
+	a.writeHandoff(jsonOutput, report)
+	return ExitOK, nil
 }
 
 func (a *App) recover(ctx context.Context, args []string, jsonOutput bool) (int, error) {
@@ -337,6 +417,10 @@ func (a *App) recover(ctx context.Context, args []string, jsonOutput bool) (int,
 	}
 	report, err := a.Journal.RecoverTail(ctx, *task)
 	if err != nil {
+		if report.Before.Health == store.Corrupt {
+			a.writeRecoverCorrupt(jsonOutput, report)
+			return exitCode(err), nil
+		}
 		return exitCode(err), err
 	}
 	a.writeHealth(jsonOutput, report.After)

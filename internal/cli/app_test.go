@@ -160,6 +160,133 @@ func TestCLIStatusAndRecoverHandleRecoverableTail(t *testing.T) {
 	run(ExitOK, "status", "--task", "T-0003")
 }
 
+func TestCLIRecoverCorruptJSONReportsBackupPath(t *testing.T) {
+	root := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := NewApp(root, &stdout, &stderr, func() time.Time { return time.Date(2026, 7, 25, 3, 0, 0, 0, time.UTC) })
+	run := func(args ...string) {
+		t.Helper()
+		stdout.Reset()
+		stderr.Reset()
+		if code := app.Run(args); code != ExitOK {
+			t.Fatalf("%v: code=%d stderr=%s", args, code, stderr.String())
+		}
+	}
+	run("init")
+	run("client", "register", "--id", "codex", "--name", "Codex", "--capability", "create_task", "--capability", "review")
+	run("project", "create", "--id", "project-1", "--name", "Demo")
+	run("task", "create", "--id", "T-0004", "--project", "project-1", "--title", "Recover task", "--objective", "Recover", "--acceptance", "Pass", "--creator", "codex")
+	if err := os.WriteFile(filepath.Join(root, "collaboration", "tasks", "T-0004", "messages.jsonl"), []byte("not-json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := app.Run([]string{"--json", "recover", "--task", "T-0004"}); code != ExitCorrupt {
+		t.Fatalf("recover code=%d stderr=%s", code, stderr.String())
+	}
+	var output struct {
+		Error      string `json:"error"`
+		Health     string `json:"health"`
+		BackupPath string `json:"backup_path"`
+	}
+	if !json.Valid(stdout.Bytes()) || json.Unmarshal(stdout.Bytes(), &output) != nil || output.Error != store.ErrCorrupt.Error() || output.Health != string(store.Corrupt) || output.BackupPath == "" {
+		t.Fatalf("recover output = %q", stdout.String())
+	}
+	if _, err := os.Stat(output.BackupPath); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCLIBindingStatusAndManualHandoff(t *testing.T) {
+	root := t.TempDir()
+	projectPath := filepath.Join(root, "project")
+	if err := os.MkdirAll(filepath.Join(projectPath, "changes"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(projectPath, "reports"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, "changes", "fix.diff"), []byte("diff\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, "reports", "test.txt"), []byte("tests\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	app := NewApp(root, &stdout, &stderr, func() time.Time { return time.Date(2026, 7, 25, 4, 0, 0, 0, time.UTC) })
+	run := func(args ...string) {
+		t.Helper()
+		stdout.Reset()
+		stderr.Reset()
+		if code := app.Run(append([]string{"--json"}, args...)); code != ExitOK {
+			t.Fatalf("%v: code=%d stderr=%s", args, code, stderr.String())
+		}
+		if !json.Valid(stdout.Bytes()) {
+			t.Fatalf("%v: non-JSON stdout=%s", args, stdout.String())
+		}
+	}
+	run("init")
+	run("client", "register", "--id", "codex", "--name", "Codex", "--capability", "create_task", "--capability", "review")
+	run("client", "register", "--id", "cc-haha", "--name", "CC-HAHA", "--capability", "execute")
+	run("project", "create", "--id", "project-1", "--name", "Demo")
+	run("project", "bind", "--project", "project-1", "--device", "device-1", "--path", projectPath, "--revision", "r1")
+	run("project", "binding-status", "--project", "project-1", "--device", "device-1")
+	if strings.Contains(stdout.String(), projectPath) {
+		t.Fatal("binding status leaked local path")
+	}
+	run("task", "create", "--id", "T-0005", "--project", "project-1", "--title", "Handoff task", "--objective", "Test export", "--acceptance", "Pass", "--creator", "codex")
+	run("task", "assign", "--task", "T-0005", "--client", "cc-haha", "--expected-version", "1")
+	run("task", "accept", "--task", "T-0005", "--actor", "cc-haha", "--expected-version", "2")
+	run("evidence", "add", "--task", "T-0005", "--id", "E-diff", "--kind", "diff", "--summary", "Diff", "--created-by", "cc-haha", "--file-ref", "changes/fix.diff", "--expected-version", "3")
+	run("evidence", "add", "--task", "T-0005", "--id", "E-test", "--kind", "test", "--summary", "Tests", "--created-by", "cc-haha", "--file-ref", "reports/test.txt", "--expected-version", "4")
+	run("handoff", "export", "--task", "T-0005", "--client", "cc-haha", "--adapter", "manual-cc-haha", "--device", "device-1", "--after-event", "0", "--output", "handoff-cc")
+	ccHandoff, err := os.ReadFile(filepath.Join(root, "handoff-cc", "handoff.md"))
+	if err != nil || strings.Contains(string(ccHandoff), projectPath) {
+		t.Fatalf("manual-cc-haha package = %s, %v", ccHandoff, err)
+	}
+	run("task", "submit", "--task", "T-0005", "--actor", "cc-haha", "--evidence", "E-diff", "--evidence", "E-test", "--expected-version", "5")
+	run("handoff", "export", "--task", "T-0005", "--client", "codex", "--adapter", "manual-codex", "--device", "device-1", "--after-event", "5", "--output", "handoff-codex")
+	if _, err := os.Stat(filepath.Join(root, "handoff-codex", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	run("status", "--task", "T-0005", "--device", "device-1")
+	var status struct {
+		BindingAvailable bool     `json:"binding_available"`
+		AllowedActions   []string `json:"allowed_actions"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil || !status.BindingAvailable || len(status.AllowedActions) == 0 {
+		t.Fatalf("status=%s err=%v", stdout.String(), err)
+	}
+}
+
+func TestCLIEvidenceAddReportsIdempotency(t *testing.T) {
+	root := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := NewApp(root, &stdout, &stderr, func() time.Time { return time.Date(2026, 7, 25, 5, 0, 0, 0, time.UTC) })
+	run := func(args ...string) map[string]any {
+		t.Helper()
+		stdout.Reset()
+		stderr.Reset()
+		if code := app.Run(append([]string{"--json"}, args...)); code != ExitOK {
+			t.Fatalf("%v: code=%d stderr=%s", args, code, stderr.String())
+		}
+		var output map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+			t.Fatal(err)
+		}
+		return output
+	}
+	run("init")
+	run("client", "register", "--id", "codex", "--name", "Codex", "--capability", "create_task", "--capability", "review")
+	run("project", "create", "--id", "project-1", "--name", "Demo")
+	run("task", "create", "--id", "T-0006", "--project", "project-1", "--title", "Evidence task", "--objective", "Test idempotency", "--acceptance", "Pass", "--creator", "codex")
+	first := run("evidence", "add", "--task", "T-0006", "--id", "E-0001", "--kind", "diff", "--summary", "Diff", "--created-by", "codex", "--expected-version", "1")
+	second := run("evidence", "add", "--task", "T-0006", "--id", "E-0001", "--kind", "diff", "--summary", "Diff", "--created-by", "codex", "--expected-version", "1")
+	if first["changed"] != true || second["changed"] != false || first["version"] != second["version"] || first["last_event_id"] != second["last_event_id"] {
+		t.Fatalf("idempotent output first=%v second=%v", first, second)
+	}
+}
+
 type cliFailingReplacer struct{}
 
 func (cliFailingReplacer) Replace(_, path string) error {

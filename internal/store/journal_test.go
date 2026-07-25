@@ -52,6 +52,23 @@ func TestCommitTransitionDerivesEventAndState(t *testing.T) {
 	}
 }
 
+func TestAssignRequiresRegisteredExecutingTarget(t *testing.T) {
+	journal, root := newJournal(t)
+	registry := NewFileRegistryStore(root, FlockLocker{})
+	if err := registry.RegisterClient(context.Background(), protocol.Client{ID: "review-only", Name: "Review only", Capabilities: []string{"review"}}); err != nil {
+		t.Fatal(err)
+	}
+	createTask(t, journal, "T-0001")
+	for _, target := range []string{"ghost-client", "review-only"} {
+		if _, err := journal.CommitTransition(context.Background(), "T-0001", 1, protocol.TransitionIntent{Action: protocol.Assign, Actor: "codex", NextAssignee: target, At: journalTime}, nil); err == nil {
+			t.Fatalf("assignment to %q accepted", target)
+		}
+	}
+	if _, err := journal.CommitTransition(context.Background(), "T-0001", 1, protocol.TransitionIntent{Action: protocol.Assign, Actor: "codex", NextAssignee: "cc-haha", At: journalTime}, nil); err != nil {
+		t.Fatalf("assignment to executor rejected: %v", err)
+	}
+}
+
 func TestAppendMessagePreservesBusinessState(t *testing.T) {
 	journal, _ := newJournal(t)
 	createTask(t, journal, "T-0001")
@@ -68,9 +85,9 @@ func TestAddEvidenceDerivesSubmissionKindsAndPreservesBusinessState(t *testing.T
 	journal, _ := newJournal(t)
 	createTask(t, journal, "T-0001")
 	diff := protocol.Evidence{ID: "E-diff", TaskID: "T-0001", Kind: protocol.EvidenceDiff, Summary: "Diff", CreatedBy: "codex", CreatedAt: journalTime}
-	next, err := journal.AddEvidence(context.Background(), "T-0001", 1, diff)
-	if err != nil || next.Status != protocol.Draft || next.Version != 2 || next.LastEventID != 2 {
-		t.Fatalf("AddEvidence() = %+v, %v", next, err)
+	added, err := journal.AddEvidence(context.Background(), "T-0001", 1, diff)
+	if err != nil || !added.Changed || added.State.Status != protocol.Draft || added.State.Version != 2 || added.State.LastEventID != 2 {
+		t.Fatalf("AddEvidence() = %+v, %v", added, err)
 	}
 	testEvidence := protocol.Evidence{ID: "E-test", TaskID: "T-0001", Kind: protocol.EvidenceTest, Summary: "Tests", CreatedBy: "codex", CreatedAt: journalTime}
 	if _, err := journal.AddEvidence(context.Background(), "T-0001", 2, testEvidence); err != nil {
@@ -85,7 +102,7 @@ func TestAddEvidenceDerivesSubmissionKindsAndPreservesBusinessState(t *testing.T
 	if _, err := journal.CommitTransition(context.Background(), "T-0001", 5, protocol.TransitionIntent{Action: protocol.Submit, Actor: "cc-haha", At: journalTime}, []string{"E-missing"}); err == nil {
 		t.Fatal("missing evidence accepted")
 	}
-	next, err = journal.CommitTransition(context.Background(), "T-0001", 5, protocol.TransitionIntent{Action: protocol.Submit, Actor: "cc-haha", At: journalTime}, []string{"E-diff", "E-test"})
+	next, err := journal.CommitTransition(context.Background(), "T-0001", 5, protocol.TransitionIntent{Action: protocol.Submit, Actor: "cc-haha", At: journalTime}, []string{"E-diff", "E-test"})
 	if err != nil || next.Status != protocol.Review || next.Version != 6 {
 		t.Fatalf("CommitTransition() = %+v, %v", next, err)
 	}
@@ -103,9 +120,64 @@ func TestAddEvidenceCanResumeFromOrphanAfterRecovery(t *testing.T) {
 	if _, err := journal.RecoverTail(context.Background(), "T-0001"); err != nil {
 		t.Fatal(err)
 	}
-	next, err := journal.AddEvidence(context.Background(), "T-0001", 1, evidence)
-	if err != nil || next.Version != 2 || next.Status != protocol.Draft {
-		t.Fatalf("AddEvidence() = %+v, %v", next, err)
+	added, err := journal.AddEvidence(context.Background(), "T-0001", 1, evidence)
+	if err != nil || !added.Changed || added.State.Version != 2 || added.State.Status != protocol.Draft {
+		t.Fatalf("AddEvidence() = %+v, %v", added, err)
+	}
+}
+
+func TestAddEvidenceIsJournalIdempotent(t *testing.T) {
+	journal, _ := newJournal(t)
+	createTask(t, journal, "T-0001")
+	evidence := protocol.Evidence{ID: "E-0001", TaskID: "T-0001", Kind: protocol.EvidenceDiff, Summary: "Diff", CreatedBy: "codex", CreatedAt: journalTime}
+	first, err := journal.AddEvidence(context.Background(), "T-0001", 1, evidence)
+	if err != nil || !first.Changed || first.State.Version != 2 {
+		t.Fatalf("first AddEvidence() = %+v, %v", first, err)
+	}
+	second, err := journal.AddEvidence(context.Background(), "T-0001", 1, evidence)
+	if err != nil || second.Changed || second.State.Version != first.State.Version || second.State.LastEventID != first.State.LastEventID {
+		t.Fatalf("idempotent AddEvidence() = %+v, %v", second, err)
+	}
+}
+
+func TestCommitTransitionRejectsUnannouncedEvidence(t *testing.T) {
+	journal, _ := newJournal(t)
+	createTask(t, journal, "T-0001")
+	if _, err := journal.CommitTransition(context.Background(), "T-0001", 1, protocol.TransitionIntent{Action: protocol.Assign, Actor: "codex", NextAssignee: "cc-haha", At: journalTime}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.CommitTransition(context.Background(), "T-0001", 2, protocol.TransitionIntent{Action: protocol.Accept, Actor: "cc-haha", At: journalTime}, nil); err != nil {
+		t.Fatal(err)
+	}
+	diff := protocol.Evidence{ID: "E-diff", TaskID: "T-0001", Kind: protocol.EvidenceDiff, Summary: "Diff", CreatedBy: "cc-haha", CreatedAt: journalTime}
+	testEvidence := protocol.Evidence{ID: "E-test", TaskID: "T-0001", Kind: protocol.EvidenceTest, Summary: "Tests", CreatedBy: "cc-haha", CreatedAt: journalTime}
+	for _, evidence := range []protocol.Evidence{diff, testEvidence} {
+		if _, err := journal.Evidence.EnsureEvidence(context.Background(), evidence); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := journal.CommitTransition(context.Background(), "T-0001", 3, protocol.TransitionIntent{Action: protocol.Submit, Actor: "cc-haha", At: journalTime}, []string{diff.ID, testEvidence.ID}); err == nil {
+		t.Fatal("unannounced evidence was accepted")
+	}
+}
+
+func TestInspectRejectsDuplicateEvidenceAnnouncement(t *testing.T) {
+	journal, root := newJournal(t)
+	createTask(t, journal, "T-0001")
+	evidence := protocol.Evidence{ID: "E-0001", TaskID: "T-0001", Kind: protocol.EvidenceDiff, Summary: "Diff", CreatedBy: "codex", CreatedAt: journalTime}
+	if _, err := journal.AddEvidence(context.Background(), "T-0001", 1, evidence); err != nil {
+		t.Fatal(err)
+	}
+	events := readEvents(t, root, "T-0001")
+	duplicate := events[1]
+	duplicate.EventID = 3
+	duplicate.ExpectedVersion = 2
+	events = append(events, duplicate)
+	writeEvents(t, root, "T-0001", events)
+	writeState(t, root, protocol.State{TaskID: "T-0001", Status: protocol.Draft, Version: 3, LastEventID: 3, ResponsibleClient: "codex", UpdatedAt: journalTime})
+	report, err := journal.Inspect(context.Background(), "T-0001")
+	if err != nil || report.Health != Corrupt {
+		t.Fatalf("Inspect() = %+v, %v", report, err)
 	}
 }
 
@@ -204,6 +276,23 @@ func TestInspectRejectsInvalidAuditChain(t *testing.T) {
 	}
 }
 
+func TestInspectRejectsTamperedAssignmentTargetReferences(t *testing.T) {
+	for _, target := range []string{"ghost-client", "codex"} {
+		t.Run(target, func(t *testing.T) {
+			journal, root := newJournal(t)
+			createTask(t, journal, "T-0001")
+			state := protocol.State{TaskID: "T-0001", Status: protocol.Assigned, Version: 2, LastEventID: 2, AssignedClient: target, ResponsibleClient: target, UpdatedAt: journalTime}
+			writeState(t, root, state)
+			events := append(readEvents(t, root, "T-0001"), protocol.Event{EventID: 2, TaskID: "T-0001", Type: protocol.EventAssigned, Actor: "codex", At: journalTime, TargetClient: target, ExpectedVersion: 1})
+			writeEvents(t, root, "T-0001", events)
+			report, err := journal.Inspect(context.Background(), "T-0001")
+			if err != nil || report.Health != Corrupt {
+				t.Fatalf("Inspect() = %+v, %v", report, err)
+			}
+		})
+	}
+}
+
 func TestRecoverTailRestoresPriorState(t *testing.T) {
 	journal, _ := newJournal(t)
 	createTask(t, journal, "T-0001")
@@ -239,7 +328,8 @@ func TestFaultInjectionShortWritesAndOutcomeUnknown(t *testing.T) {
 		t.Fatalf("report = %+v", report)
 	}
 	fs.partialBackup = true
-	if _, err := journal.RecoverTail(context.Background(), "T-0001"); err == nil {
+	recovery, err := journal.RecoverTail(context.Background(), "T-0001")
+	if err == nil || recovery.BackupError == "" {
 		t.Fatal("backup short write accepted")
 	}
 	fs.disableFaults()

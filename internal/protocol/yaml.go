@@ -5,14 +5,11 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
-
-var absolutePathPattern = regexp.MustCompile(`^(?:[A-Za-z]:[\\/]|\\\\)`)
 
 func DecodeTask(data []byte, path string, refs References) (Task, error) {
 	var task Task
@@ -116,13 +113,5 @@ func forbiddenKey(key string) bool {
 }
 
 func isLocalFilesystemPath(value string) bool {
-	if absolutePathPattern.MatchString(value) || strings.HasPrefix(value, "~/") || strings.HasPrefix(value, "file://") {
-		return true
-	}
-	for _, prefix := range []string{"/home/", "/Users/", "/root/", "/tmp/", "/var/", "/etc/", "/opt/", "/usr/", "/mnt/", "/srv/", "/workspace/"} {
-		if strings.HasPrefix(value, prefix) {
-			return true
-		}
-	}
-	return false
+	return strings.HasPrefix(value, "~/") || containsLocalFilesystemPath(value)
 }

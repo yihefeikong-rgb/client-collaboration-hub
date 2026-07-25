@@ -6,12 +6,9 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 )
-
-var credentialValuePattern = regexp.MustCompile(`(?i)(?:secret|token|password|credential|api[_-]?key)\s*(?:=|:)|ghp_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+`)
 
 type Evidence struct {
 	ID        string       `json:"id"`
@@ -44,6 +41,9 @@ func (e Evidence) Validate(expectedID string) error {
 	if strings.TrimSpace(e.Summary) == "" {
 		return fmt.Errorf("evidence summary is required")
 	}
+	if err := ValidatePortableText("evidence summary", e.Summary); err != nil {
+		return err
+	}
 	if err := validateID("evidence created_by", e.CreatedBy, ""); err != nil {
 		return err
 	}
@@ -52,8 +52,11 @@ func (e Evidence) Validate(expectedID string) error {
 	}
 	seen := map[string]bool{}
 	for _, ref := range e.FileRefs {
-		if strings.TrimSpace(ref) == "" || seen[ref] || isLocalFilesystemPath(ref) || credentialValuePattern.MatchString(ref) {
-			return fmt.Errorf("invalid or duplicate evidence file_ref %q", ref)
+		if seen[ref] {
+			return fmt.Errorf("duplicate evidence file_ref")
+		}
+		if err := ValidatePortableFileRef(ref); err != nil {
+			return err
 		}
 		seen[ref] = true
 	}

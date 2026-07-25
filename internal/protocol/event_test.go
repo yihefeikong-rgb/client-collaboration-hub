@@ -30,3 +30,12 @@ func TestEventRejectsNonUTCTime(t *testing.T) {
 		t.Fatal("local time accepted")
 	}
 }
+
+func TestEventRejectsUnsafePortableBody(t *testing.T) {
+	for _, body := range []string{"token=do-not-store", `C:\Users\name\secret.txt`, "/home/name/secret.txt"} {
+		event := Event{EventID: 1, TaskID: "T-0001", Type: EventMessageAdded, Actor: "codex", At: time.Date(2026, 7, 25, 0, 0, 0, 0, time.UTC), Body: body, ExpectedVersion: 0}
+		if err := event.Validate("T-0001"); err == nil {
+			t.Fatalf("unsafe body %q accepted", body)
+		}
+	}
+}

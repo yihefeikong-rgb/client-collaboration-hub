@@ -20,6 +20,7 @@ func Replay(task Task, events []Event, refs References, resolver EvidenceResolve
 		return State{}, fmt.Errorf("task_created event is missing")
 	}
 	var state State
+	announcedEvidence := map[string]bool{}
 	for index, event := range events {
 		if err := event.Validate(task.ID); err != nil {
 			return State{}, err
@@ -51,12 +52,13 @@ func Replay(task Task, events []Event, refs References, resolver EvidenceResolve
 			if !isMessageParticipant(event.Actor, task, state) {
 				return State{}, fmt.Errorf("evidence actor is not a task participant")
 			}
-			if err := validateEvidenceAdded(event, resolver); err != nil {
+			if err := validateEvidenceAdded(event, resolver, announcedEvidence); err != nil {
 				return State{}, err
 			}
+			announcedEvidence[event.EvidenceRefs[0]] = true
 			state = advanceNonBusiness(state, event)
 		default:
-			state, err = replayTransition(state, task, event, refs, resolver)
+			state, err = replayTransition(state, task, event, refs, resolver, announcedEvidence)
 			if err != nil {
 				return State{}, err
 			}
@@ -75,7 +77,7 @@ func replayTaskCreated(task Task, event Event) error {
 	return nil
 }
 
-func replayTransition(state State, task Task, event Event, refs References, resolver EvidenceResolver) (State, error) {
+func replayTransition(state State, task Task, event Event, refs References, resolver EvidenceResolver, announcedEvidence map[string]bool) (State, error) {
 	action, err := actionForEvent(event.Type)
 	if err != nil {
 		return State{}, err
@@ -83,7 +85,18 @@ func replayTransition(state State, task Task, event Event, refs References, reso
 	if err := validateTransitionCapability(action, event.Actor, task, state, refs); err != nil {
 		return State{}, err
 	}
-	kinds, err := evidenceKinds(event.EvidenceRefs, task.ID, resolver)
+	if event.Type != EventSubmitted && event.Type != EventBlocked && len(event.EvidenceRefs) != 0 {
+		return State{}, fmt.Errorf("event type %q must not include evidence", event.Type)
+	}
+	if event.Type != EventChangesRequested && strings.TrimSpace(event.Body) != "" {
+		return State{}, fmt.Errorf("event type %q must not include body", event.Type)
+	}
+	if event.Type == EventAssigned {
+		if err := ValidateAssignmentTarget(event.TargetClient, refs); err != nil {
+			return State{}, err
+		}
+	}
+	kinds, err := evidenceKinds(event.EvidenceRefs, task.ID, resolver, announcedEvidence)
 	if err != nil {
 		return State{}, err
 	}
@@ -93,12 +106,6 @@ func replayTransition(state State, task Task, event Event, refs References, reso
 		request.NextAssignee = event.TargetClient
 	case EventChangesRequested:
 		request.Feedback = event.Body
-	}
-	if event.Type != EventSubmitted && event.Type != EventBlocked && len(event.EvidenceRefs) != 0 {
-		return State{}, fmt.Errorf("event type %q must not include evidence", event.Type)
-	}
-	if event.Type != EventChangesRequested && strings.TrimSpace(event.Body) != "" {
-		return State{}, fmt.Errorf("event type %q must not include body", event.Type)
 	}
 	return Transition(state, task, request)
 }
@@ -128,6 +135,9 @@ func validateTransitionCapability(action Action, actor string, task Task, state 
 	capability := "execute"
 	switch action {
 	case Assign:
+		if actor != task.Creator {
+			return fmt.Errorf("assign actor %q is not the task creator", actor)
+		}
 		capability = "create_task"
 	case RequestChanges, Approve:
 		capability = "review"
@@ -149,9 +159,24 @@ func validateTransitionCapability(action Action, actor string, task Task, state 
 	return nil
 }
 
-func validateEvidenceAdded(event Event, resolver EvidenceResolver) error {
+// ValidateAssignmentTarget verifies the durable registry reference required by
+// an assigned event. It is shared by write-time validation and Replay.
+func ValidateAssignmentTarget(target string, refs References) error {
+	if refs == nil || !IsValidID(target) || !refs.ClientExists(target) {
+		return fmt.Errorf("assigned client is not registered")
+	}
+	if !refs.ClientHasCapability(target, "execute") {
+		return fmt.Errorf("assigned client lacks execute capability")
+	}
+	return nil
+}
+
+func validateEvidenceAdded(event Event, resolver EvidenceResolver, announcedEvidence map[string]bool) error {
 	if len(event.EvidenceRefs) != 1 {
 		return fmt.Errorf("evidence_added requires exactly one evidence reference")
+	}
+	if announcedEvidence[event.EvidenceRefs[0]] {
+		return fmt.Errorf("evidence %q was already announced", event.EvidenceRefs[0])
 	}
 	evidence, err := resolver.ResolveEvidence(event.TaskID, event.EvidenceRefs[0])
 	if err != nil {
@@ -163,7 +188,7 @@ func validateEvidenceAdded(event Event, resolver EvidenceResolver) error {
 	return nil
 }
 
-func evidenceKinds(refs []string, taskID string, resolver EvidenceResolver) ([]EvidenceKind, error) {
+func evidenceKinds(refs []string, taskID string, resolver EvidenceResolver, announcedEvidence map[string]bool) ([]EvidenceKind, error) {
 	seen := map[string]bool{}
 	kinds := make([]EvidenceKind, 0, len(refs))
 	for _, id := range refs {
@@ -171,6 +196,9 @@ func evidenceKinds(refs []string, taskID string, resolver EvidenceResolver) ([]E
 			return nil, fmt.Errorf("duplicate evidence reference %q", id)
 		}
 		seen[id] = true
+		if !announcedEvidence[id] {
+			return nil, fmt.Errorf("evidence %q has not been announced", id)
+		}
 		evidence, err := resolver.ResolveEvidence(taskID, id)
 		if err != nil {
 			return nil, err

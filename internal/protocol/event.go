@@ -62,6 +62,11 @@ func (e Event) Validate(taskID string) error {
 	if eventNeedsBody(e.Type) && strings.TrimSpace(e.Body) == "" {
 		return fmt.Errorf("event type %q requires body", e.Type)
 	}
+	if e.Body != "" {
+		if err := ValidatePortableText("event body", e.Body); err != nil {
+			return err
+		}
+	}
 	if e.ExpectedVersion < 0 {
 		return fmt.Errorf("event expected_version must not be negative")
 	}

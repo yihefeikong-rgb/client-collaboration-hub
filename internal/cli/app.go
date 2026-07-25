@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/handoff"
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/store"
 )
 
@@ -15,7 +16,10 @@ type App struct {
 	Stderr   io.Writer
 	Clock    func() time.Time
 	Registry store.RegistryStore
+	Bindings store.BindingStore
 	Journal  store.TaskJournal
+	Query    store.TaskQuery
+	Handoff  *handoff.Service
 }
 
 func NewApp(root string, stdout, stderr io.Writer, clock func() time.Time) *App {
@@ -25,13 +29,19 @@ func NewApp(root string, stdout, stderr io.Writer, clock func() time.Time) *App 
 	dataRoot := filepath.Join(root, "collaboration")
 	registry := store.NewFileRegistryStore(dataRoot, store.FlockLocker{})
 	evidence := store.NewFileEvidenceStore(dataRoot)
+	journal := store.NewFileTaskJournal(dataRoot, store.FlockLocker{}, registry, evidence)
+	bindings := store.NewFileBindingStore(dataRoot, store.FlockLocker{}, registry)
+	query := store.NewFileTaskQuery(journal, registry)
 	return &App{
 		Root:     root,
 		Stdout:   stdout,
 		Stderr:   stderr,
 		Clock:    clock,
 		Registry: registry,
-		Journal:  store.NewFileTaskJournal(dataRoot, store.FlockLocker{}, registry, evidence),
+		Bindings: bindings,
+		Journal:  journal,
+		Query:    query,
+		Handoff:  handoff.NewService(query, bindings, store.NewFileBindingResolver(), registry),
 	}
 }
 

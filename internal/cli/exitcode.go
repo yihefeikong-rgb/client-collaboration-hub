@@ -32,6 +32,8 @@ func exitCode(err error) int {
 		return ExitCorrupt
 	case errors.Is(err, store.ErrCommitOutcomeUnknown):
 		return ExitUnknown
+	case errors.Is(err, store.ErrBindingUnavailable):
+		return ExitBinding
 	case errors.Is(err, store.ErrTaskNotFound), errors.Is(err, store.ErrNotFound):
 		return ExitNotFound
 	}

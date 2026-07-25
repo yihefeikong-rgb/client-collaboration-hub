@@ -38,3 +38,18 @@ func TestTaskValidationRequiresCapabilities(t *testing.T) {
 		t.Fatal("creator without create_task capability accepted")
 	}
 }
+
+func TestEvidenceRejectsNonPortableFileRefs(t *testing.T) {
+	valid := Evidence{ID: "E-0001", TaskID: "T-0001", Kind: EvidenceDiff, Summary: "Source diff", CreatedBy: "cc-haha", CreatedAt: time.Date(2026, 7, 25, 0, 0, 0, 0, time.UTC)}
+	for _, ref := range []string{
+		"../secret", "folder/../../secret", `..\secret`, `folder\..\secret`, `C:\secret`, "/home/user/secret", "file:///secret", "https://example.com/file", "folder//file", "folder/./file",
+	} {
+		t.Run(ref, func(t *testing.T) {
+			evidence := valid
+			evidence.FileRefs = []string{ref}
+			if err := evidence.Validate(evidence.ID); err == nil {
+				t.Fatalf("file_ref %q accepted", ref)
+			}
+		})
+	}
+}

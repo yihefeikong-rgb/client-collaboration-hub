@@ -47,6 +47,8 @@ const (
 	Resume         Action = "resume"
 	Approve        Action = "approve"
 	Block          Action = "block"
+	Message        Action = "message"
+	AddEvidence    Action = "evidence_add"
 )
 
 type TransitionRequest struct {

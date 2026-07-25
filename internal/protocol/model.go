@@ -45,6 +45,9 @@ func (p Project) Validate(expectedID string) error {
 	if strings.TrimSpace(p.Name) == "" {
 		return fmt.Errorf("project name is required")
 	}
+	if err := ValidatePortableText("project name", p.Name); err != nil {
+		return err
+	}
 	return validateUTCTime("project created_at", p.CreatedAt)
 }
 
@@ -54,6 +57,9 @@ func (c Client) Validate(expectedID string) error {
 	}
 	if strings.TrimSpace(c.Name) == "" {
 		return fmt.Errorf("client name is required")
+	}
+	if err := ValidatePortableText("client name", c.Name); err != nil {
+		return err
 	}
 	if len(c.Capabilities) == 0 {
 		return fmt.Errorf("client capabilities are required")
@@ -96,9 +102,18 @@ func (t Task) Validate(expectedID string, refs References) error {
 	if strings.TrimSpace(t.Title) == "" || strings.TrimSpace(t.Objective) == "" || len(t.Acceptance) == 0 {
 		return fmt.Errorf("title, objective, and acceptance are required")
 	}
+	if err := ValidatePortableText("task title", t.Title); err != nil {
+		return err
+	}
+	if err := ValidatePortableText("task objective", t.Objective); err != nil {
+		return err
+	}
 	for _, criterion := range t.Acceptance {
 		if strings.TrimSpace(criterion) == "" {
 			return fmt.Errorf("acceptance must not contain empty values")
+		}
+		if err := ValidatePortableText("task acceptance", criterion); err != nil {
+			return err
 		}
 	}
 	for field, id := range map[string]string{"creator": t.Creator, "reviewer": t.Reviewer} {

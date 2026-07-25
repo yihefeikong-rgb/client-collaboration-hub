@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -42,9 +43,15 @@ type HealthReport struct {
 }
 
 type RecoveryReport struct {
-	Before     HealthReport
-	After      HealthReport
-	BackupPath string
+	Before      HealthReport
+	After       HealthReport
+	BackupPath  string
+	BackupError string
+}
+
+type EvidenceAddResult struct {
+	State   protocol.State
+	Changed bool
 }
 
 type TaskJournal interface {
@@ -52,7 +59,7 @@ type TaskJournal interface {
 	CreateTask(context.Context, protocol.Task) error
 	CommitTransition(context.Context, string, int64, protocol.TransitionIntent, []string) (protocol.State, error)
 	AppendMessage(context.Context, string, int64, string, string, time.Time) (protocol.State, error)
-	AddEvidence(context.Context, string, int64, protocol.Evidence) (protocol.State, error)
+	AddEvidence(context.Context, string, int64, protocol.Evidence) (EvidenceAddResult, error)
 	RecoverTail(context.Context, string) (RecoveryReport, error)
 }
 
@@ -241,7 +248,11 @@ func (j *FileTaskJournal) CommitTransition(ctx context.Context, taskID string, e
 	if err := j.validateTransitionActor(intent, task, report.State); err != nil {
 		return protocol.State{}, err
 	}
-	kinds, err := j.evidenceKinds(ctx, taskID, evidenceRefs)
+	announcedEvidence, err := j.announcedEvidence(taskID, report.State.LastEventID)
+	if err != nil {
+		return protocol.State{}, err
+	}
+	kinds, err := j.evidenceKinds(ctx, taskID, evidenceRefs, announcedEvidence)
 	if err != nil {
 		return protocol.State{}, err
 	}
@@ -297,37 +308,56 @@ func (j *FileTaskJournal) AppendMessage(ctx context.Context, taskID string, expe
 	return next, nil
 }
 
-func (j *FileTaskJournal) AddEvidence(ctx context.Context, taskID string, expectedVersion int64, evidence protocol.Evidence) (protocol.State, error) {
+func (j *FileTaskJournal) AddEvidence(ctx context.Context, taskID string, expectedVersion int64, evidence protocol.Evidence) (EvidenceAddResult, error) {
 	lock, err := j.Locks.Task(ctx, taskID)
 	if err != nil {
-		return protocol.State{}, err
+		return EvidenceAddResult{}, err
 	}
 	defer lock.Unlock()
 	report, err := j.inspectUnlocked(taskID)
 	if err != nil {
-		return protocol.State{}, err
+		return EvidenceAddResult{}, err
 	}
 	if report.Health == RecoverableTail {
-		return protocol.State{}, ErrRecoveryRequired
+		return EvidenceAddResult{}, ErrRecoveryRequired
 	}
 	if report.Health == Corrupt {
-		return protocol.State{}, ErrCorrupt
-	}
-	if expectedVersion != report.State.Version {
-		return protocol.State{}, ErrVersionConflict
+		return EvidenceAddResult{}, ErrCorrupt
 	}
 	task, err := j.readTask(taskID)
 	if err != nil {
-		return protocol.State{}, err
+		return EvidenceAddResult{}, err
 	}
-	if evidence.TaskID != taskID || evidence.Validate(evidence.ID) != nil || !j.References.ClientExists(evidence.CreatedBy) || !isTaskParticipant(evidence.CreatedBy, task, report.State) || evidence.CreatedAt.Before(report.State.UpdatedAt) {
-		return protocol.State{}, fmt.Errorf("invalid evidence intent")
+	if evidence.TaskID != taskID || evidence.Validate(evidence.ID) != nil || !j.References.ClientExists(evidence.CreatedBy) || !isTaskParticipant(evidence.CreatedBy, task, report.State) {
+		return EvidenceAddResult{}, fmt.Errorf("invalid evidence intent")
 	}
 	if j.Evidence == nil {
-		return protocol.State{}, fmt.Errorf("task journal evidence store is required")
+		return EvidenceAddResult{}, fmt.Errorf("task journal evidence store is required")
 	}
-	if _, err := j.Evidence.EnsureEvidence(ctx, evidence); err != nil {
-		return protocol.State{}, err
+	existing, readErr := j.Evidence.ReadEvidence(ctx, taskID, evidence.ID)
+	if readErr != nil && !errors.Is(readErr, ErrNotFound) {
+		return EvidenceAddResult{}, readErr
+	}
+	if readErr == nil && !reflect.DeepEqual(existing, evidence) {
+		return EvidenceAddResult{}, fmt.Errorf("%w: evidence %q", ErrEvidenceConflict, evidence.ID)
+	}
+	announcedEvidence, err := j.announcedEvidence(taskID, report.State.LastEventID)
+	if err != nil {
+		return EvidenceAddResult{}, err
+	}
+	if announcedEvidence[evidence.ID] {
+		return EvidenceAddResult{State: report.State, Changed: false}, nil
+	}
+	if expectedVersion != report.State.Version {
+		return EvidenceAddResult{}, ErrVersionConflict
+	}
+	if evidence.CreatedAt.Before(report.State.UpdatedAt) {
+		return EvidenceAddResult{}, fmt.Errorf("invalid evidence intent")
+	}
+	if readErr != nil {
+		if _, err := j.Evidence.EnsureEvidence(ctx, evidence); err != nil {
+			return EvidenceAddResult{}, err
+		}
 	}
 	next := report.State
 	next.Version++
@@ -335,9 +365,9 @@ func (j *FileTaskJournal) AddEvidence(ctx context.Context, taskID string, expect
 	next.UpdatedAt = evidence.CreatedAt
 	event := protocol.Event{EventID: next.LastEventID, TaskID: taskID, Type: protocol.EventEvidenceAdded, Actor: evidence.CreatedBy, At: evidence.CreatedAt, Body: evidence.Summary, EvidenceRefs: []string{evidence.ID}, ExpectedVersion: report.State.Version}
 	if err := j.commitRecord(taskID, report.State, event, next); err != nil {
-		return protocol.State{}, err
+		return EvidenceAddResult{}, err
 	}
-	return next, nil
+	return EvidenceAddResult{State: next, Changed: true}, nil
 }
 
 func eventForTransition(taskID string, state protocol.State, intent protocol.TransitionIntent, evidenceRefs []string) (protocol.Event, error) {
@@ -370,7 +400,7 @@ func eventForTransition(taskID string, state protocol.State, intent protocol.Tra
 	return event, event.Validate(taskID)
 }
 
-func (j *FileTaskJournal) evidenceKinds(ctx context.Context, taskID string, refs []string) ([]protocol.EvidenceKind, error) {
+func (j *FileTaskJournal) evidenceKinds(ctx context.Context, taskID string, refs []string, announcedEvidence map[string]bool) ([]protocol.EvidenceKind, error) {
 	if j.Evidence == nil {
 		return nil, fmt.Errorf("task journal evidence store is required")
 	}
@@ -381,6 +411,9 @@ func (j *FileTaskJournal) evidenceKinds(ctx context.Context, taskID string, refs
 			return nil, fmt.Errorf("invalid or duplicate evidence reference %q", id)
 		}
 		seen[id] = true
+		if !announcedEvidence[id] {
+			return nil, fmt.Errorf("evidence %q has not been announced", id)
+		}
 		evidence, err := j.Evidence.ReadEvidence(ctx, taskID, id)
 		if err != nil {
 			return nil, err
@@ -404,6 +437,12 @@ func (j *FileTaskJournal) validateTransitionActor(intent protocol.TransitionInte
 	capability := "execute"
 	switch intent.Action {
 	case protocol.Assign:
+		if intent.Actor != task.Creator {
+			return fmt.Errorf("assign actor %q is not the task creator", intent.Actor)
+		}
+		if err := protocol.ValidateAssignmentTarget(intent.NextAssignee, j.References); err != nil {
+			return err
+		}
 		capability = "create_task"
 	case protocol.RequestChanges, protocol.Approve:
 		capability = "review"
@@ -425,6 +464,46 @@ func (j *FileTaskJournal) validateTransitionActor(intent protocol.TransitionInte
 	return nil
 }
 
+func (j *FileTaskJournal) announcedEvidence(taskID string, lastEventID int64) (map[string]bool, error) {
+	events, err := j.readEvents(taskID)
+	if err != nil {
+		return nil, err
+	}
+	if lastEventID < 0 || int64(len(events)) < lastEventID {
+		return nil, fmt.Errorf("event log is shorter than state")
+	}
+	announced := map[string]bool{}
+	for _, event := range events[:lastEventID] {
+		if event.Type == protocol.EventEvidenceAdded {
+			if len(event.EvidenceRefs) != 1 || announced[event.EvidenceRefs[0]] {
+				return nil, fmt.Errorf("invalid evidence announcement history")
+			}
+			announced[event.EvidenceRefs[0]] = true
+		}
+	}
+	return announced, nil
+}
+
+func (j *FileTaskJournal) readEvents(taskID string) ([]protocol.Event, error) {
+	data, err := j.FS.ReadFile(j.messagesPath(taskID))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		return nil, fmt.Errorf("invalid messages.jsonl")
+	}
+	lines := bytes.Split(data[:len(data)-1], []byte{'\n'})
+	events := make([]protocol.Event, 0, len(lines))
+	for index, line := range lines {
+		event, err := protocol.DecodeEventLine(line, taskID)
+		if err != nil || event.EventID != int64(index+1) {
+			return nil, fmt.Errorf("invalid or non-contiguous event")
+		}
+		events = append(events, event)
+	}
+	return events, nil
+}
+
 func validateJournalTime(at time.Time) error {
 	if at.IsZero() || at.Location() != time.UTC {
 		return fmt.Errorf("time must be UTC and non-zero")
@@ -444,14 +523,18 @@ func (j *FileTaskJournal) RecoverTail(ctx context.Context, taskID string) (Recov
 	}
 	if report.Health == Corrupt {
 		backup, backupErr := j.backup(taskID, report)
-		return RecoveryReport{Before: report, BackupPath: backup}, errors.Join(ErrCorrupt, backupErr)
+		recovery := RecoveryReport{Before: report, BackupPath: backup}
+		if backupErr != nil {
+			recovery.BackupError = "diagnostic backup failed"
+		}
+		return recovery, errors.Join(ErrCorrupt, backupErr)
 	}
 	if report.Health != RecoverableTail {
 		return RecoveryReport{Before: report, After: report}, nil
 	}
 	backup, err := j.backup(taskID, report)
 	if err != nil {
-		return RecoveryReport{Before: report}, err
+		return RecoveryReport{Before: report, BackupError: "diagnostic backup failed"}, err
 	}
 	file, err := j.FS.OpenFile(j.messagesPath(taskID), os.O_WRONLY, 0)
 	if err != nil {

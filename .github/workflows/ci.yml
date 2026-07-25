@@ -22,6 +22,9 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: go build ./cmd/collab
+      - name: Binary CLI E2E
+        shell: pwsh
+        run: ./scripts/e2e-cli.ps1
 
   ubuntu:
     runs-on: ubuntu-latest
@@ -36,3 +39,5 @@ jobs:
       - run: go test ./...
       - run: go test -race ./...
       - run: go build ./cmd/collab
+      - name: Binary CLI E2E
+        run: ./scripts/e2e-cli.sh

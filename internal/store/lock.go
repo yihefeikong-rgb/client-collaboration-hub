@@ -61,3 +61,10 @@ func (s ScopedLocks) Projects(ctx context.Context) (Lock, error) {
 func (s ScopedLocks) Clients(ctx context.Context) (Lock, error) {
 	return s.Locker.Lock(ctx, filepath.Join(s.Root, ".runtime", "locks", "clients.lock"))
 }
+
+func (s ScopedLocks) Binding(ctx context.Context, deviceID, projectID string) (Lock, error) {
+	if !protocol.IsValidID(deviceID) || !protocol.IsValidID(projectID) {
+		return nil, fmt.Errorf("invalid binding lock ids")
+	}
+	return s.Locker.Lock(ctx, filepath.Join(s.Root, ".runtime", "locks", "bindings", deviceID, projectID+".lock"))
+}
