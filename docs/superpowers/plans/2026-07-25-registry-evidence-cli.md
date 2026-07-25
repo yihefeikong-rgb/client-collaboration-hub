@@ -99,7 +99,7 @@
 - [x] 为 outcome unknown、recoverable tail、corrupt、not found 写 CLI 错误消息和退出码测试。
 - [x] 更新协议与 CLI 文档，删除本阶段不实现的 bind/handoff/adapter 命令，写明 Replay、Evidence 原子策略和状态码。
 - [ ] 运行 `gofmt -w`、`go vet ./...`、`go test ./...`、`go test -race ./...`、`go build -o collab.exe ./cmd/collab`、`git diff --check`。
-- [ ] 提交：`git commit -m "docs: complete cli evidence workflow"`。
+- [x] 提交：`git commit -m "docs: complete cli evidence workflow"`。
 
 ### Task 6: 发布验收
 
@@ -107,6 +107,6 @@
 - Modify: only files required by test fixes or documentation corrections
 
 - [x] 在临时目录运行编译出的 `collab.exe`，保存从 init 到 DONE 的真实命令输出，不直接编辑状态或日志文件。
-- [ ] 扫描仓库中的凭据模式与本机绝对路径；仅提交本阶段文件。
+- [x] 扫描仓库中的凭据模式与本机绝对路径；仅提交本阶段文件。
 - [ ] 推送 main，等待 Windows、Ubuntu 与 Ubuntu Race CI 全绿。
 - [ ] 报告 SHA、命令演示、CI 链接与未实现的 binding/handoff/手工适配器。
