@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ func TestManualCCHahaHandoffIsPortableAndDeterministic(t *testing.T) {
 	if err := json.Unmarshal(manifestData, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.Adapter != "manual-cc-haha" || manifest.TargetClient != "cc-haha" || manifest.ActionActor != "cc-haha" || manifest.PackageID == "" || manifest.Status != protocol.Working || manifest.ThroughEvent != 5 || len(manifest.Events) != 5 || len(manifest.Evidence) != 2 {
+	if manifest.Adapter != "manual-cc-haha" || manifest.TargetData.ID != "cc-haha" || manifest.TargetData.Name != "CC-HAHA" || manifest.TargetData.Role != "executor" || manifest.ActionActor != "cc-haha" || manifest.TaskData.Title != "Fix task" || manifest.PackageID == "" || manifest.Status != protocol.Working || manifest.ThroughEvent != 5 || len(manifest.Events) != 5 || len(manifest.Evidence) != 2 {
 		t.Fatalf("manifest = %+v", manifest)
 	}
 	diffHash := sha256.Sum256([]byte("diff\n"))
@@ -56,7 +57,7 @@ func TestManualCCHahaHandoffIsPortableAndDeterministic(t *testing.T) {
 	if strings.Contains(string(handoffData), fixture.binding.LocalPath) || strings.Contains(string(manifestData), fixture.binding.LocalPath) {
 		t.Fatal("binding local path leaked into package")
 	}
-	if !strings.Contains(string(handoffData), "collab task submit") || !strings.Contains(string(handoffData), "不会读取或控制 CC-HAHA") {
+	if !strings.Contains(string(handoffData), "- `submit`") || !strings.Contains(string(handoffData), "response validate") || !strings.Contains(string(handoffData), "不会读取或控制 CC-HAHA") {
 		t.Fatalf("manual-cc-haha content = %s", handoffData)
 	}
 	secondOutput := filepath.Join(t.TempDir(), "second")
@@ -72,7 +73,23 @@ func TestManualCCHahaHandoffIsPortableAndDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(manifestData) != string(secondManifest) || string(handoffData) != string(secondHandoff) {
+	firstCandidate, err := os.ReadFile(filepath.Join(firstOutput, "candidate-response.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondCandidate, err := os.ReadFile(filepath.Join(secondOutput, "candidate-response.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstSchema, err := os.ReadFile(filepath.Join(firstOutput, "candidate-response.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSchema, err := os.ReadFile(filepath.Join(secondOutput, "candidate-response.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(manifestData) != string(secondManifest) || string(handoffData) != string(secondHandoff) || string(firstCandidate) != string(secondCandidate) || string(firstSchema) != string(secondSchema) {
 		t.Fatal("handoff export is not deterministic")
 	}
 	var repeated Manifest
@@ -121,7 +138,7 @@ func TestManualCodexHandoffUsesReviewActionsAndCursor(t *testing.T) {
 	if err := json.Unmarshal(manifestData, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.Status != protocol.Review || len(manifest.Events) != 1 || manifest.Events[0].EventID != 6 || strings.Contains(string(data), "collab task submit") || !strings.Contains(string(data), "collab review approve") || !strings.Contains(string(data), "collab review request-changes") {
+	if manifest.Status != protocol.Review || len(manifest.Events) != 1 || manifest.Events[0].EventID != 6 || strings.Contains(string(data), "- `submit`") || !strings.Contains(string(data), "- `approve`") || !strings.Contains(string(data), "- `request_changes`") {
 		t.Fatalf("manual-codex handoff = %s", data)
 	}
 }
@@ -234,11 +251,13 @@ func TestPackageIDChangesForCanonicalSnapshotInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mutate := range map[string]func(*Manifest){
-		"target":    func(value *Manifest) { value.TargetClient, value.ActionActor = "codex", "codex" },
-		"revision":  func(value *Manifest) { value.ProjectRevision = "r2" },
-		"version":   func(value *Manifest) { value.Version++ },
-		"event":     func(value *Manifest) { value.Events[0].Body = "changed event" },
-		"file hash": func(value *Manifest) { value.Evidence[0].Files[0].SHA256 = strings.Repeat("0", 64) },
+		"target":      func(value *Manifest) { value.TargetData.ID, value.ActionActor = "codex", "codex" },
+		"target name": func(value *Manifest) { value.TargetData.Name = "Different client" },
+		"task title":  func(value *Manifest) { value.TaskData.Title = "Changed title" },
+		"revision":    func(value *Manifest) { value.ProjectRevision = "r2" },
+		"version":     func(value *Manifest) { value.Version++ },
+		"event":       func(value *Manifest) { value.Events[0].Body = "changed event" },
+		"file hash":   func(value *Manifest) { value.Evidence[0].Files[0].SHA256 = strings.Repeat("0", 64) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := manifest
@@ -317,39 +336,45 @@ func TestResponseValidationIsReadOnlyAndChecksPackageIdentity(t *testing.T) {
 	if _, err := fixture.service.Export(context.Background(), ExportOptions{TaskID: "T-0001", ClientID: "cc-haha", Adapter: "manual-cc-haha", DeviceID: "device-1", AfterEventID: 0, OutputDir: output}); err != nil {
 		t.Fatal(err)
 	}
-	messagesPath := filepath.Join(filepath.Dir(fixture.projectPath), "collaboration", "tasks", "T-0001", "messages.jsonl")
-	statePath := filepath.Join(filepath.Dir(fixture.projectPath), "collaboration", "tasks", "T-0001", "state.json")
-	messagesBefore, err := os.ReadFile(messagesPath)
+	manifest, err := VerifyPackage(output)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stateBefore, err := os.ReadFile(statePath)
-	if err != nil {
-		t.Fatal(err)
+	taskDir := filepath.Join(filepath.Dir(fixture.projectPath), "collaboration", "tasks", "T-0001")
+	before := readTaskFiles(t, taskDir)
+	if _, err := ValidateResponsePackage(output, filepath.Join(output, "candidate-response.json")); err == nil {
+		t.Fatal("empty package template passed response validate")
 	}
 	input := filepath.Join(t.TempDir(), "candidate.json")
-	template, err := os.ReadFile(filepath.Join(output, "candidate-response.json"))
+	response := NewCandidateResponse(manifest)
+	response.ProposedAction = protocol.Submit
+	response.Evidence = []CandidateEvidence{
+		{ID: "E-candidate-diff", Kind: protocol.EvidenceDiff, Summary: "Candidate diff", FileRefs: []string{"changes/fix.diff"}},
+		{ID: "E-candidate-test", Kind: protocol.EvidenceTest, Summary: "Candidate tests", FileRefs: []string{"reports/test.txt"}},
+	}
+	response.EvidenceRefs = []string{"E-candidate-diff", "E-candidate-test"}
+	data, err := marshalCandidateResponse(response)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(input, template, 0o600); err != nil {
+	if err := os.WriteFile(input, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	result, err := ValidateResponsePackage(output, input)
-	if err != nil || !strings.Contains(result.CommandDraft, "collab task submit") {
+	wantSteps := []CommandStep{
+		{Program: "collab", Args: []string{"evidence", "add", "--task", "T-0001", "--id", "E-candidate-diff", "--kind", "diff", "--summary", "Candidate diff", "--created-by", "cc-haha", "--file-ref", "changes/fix.diff", "--expected-version", "5"}},
+		{Program: "collab", Args: []string{"evidence", "add", "--task", "T-0001", "--id", "E-candidate-test", "--kind", "test", "--summary", "Candidate tests", "--created-by", "cc-haha", "--file-ref", "reports/test.txt", "--expected-version", "6"}},
+		{Program: "collab", Args: []string{"task", "submit", "--task", "T-0001", "--actor", "cc-haha", "--evidence", "E-candidate-diff", "--evidence", "E-candidate-test", "--expected-version", "7"}},
+	}
+	if err != nil || !reflect.DeepEqual(result.Steps, wantSteps) {
 		t.Fatalf("response validation = %+v, %v", result, err)
 	}
-	messagesAfter, _ := os.ReadFile(messagesPath)
-	stateAfter, _ := os.ReadFile(statePath)
-	if string(messagesBefore) != string(messagesAfter) || string(stateBefore) != string(stateAfter) {
-		t.Fatal("response validation wrote task state")
-	}
-	response, err := DecodeCandidateResponse(template)
-	if err != nil {
-		t.Fatal(err)
+	after := readTaskFiles(t, taskDir)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("response validation wrote task files")
 	}
 	response.PackageID = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-	invalid, err := json.Marshal(response)
+	invalid, err := marshalCandidateResponse(response)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,12 +384,10 @@ func TestResponseValidationIsReadOnlyAndChecksPackageIdentity(t *testing.T) {
 	if _, err := ValidateResponsePackage(output, input); err == nil {
 		t.Fatal("mismatched package ID was accepted")
 	}
-	response, err = DecodeCandidateResponse(template)
-	if err != nil {
-		t.Fatal(err)
-	}
+	response = NewCandidateResponse(manifest)
+	response.ProposedAction = protocol.AddEvidence
 	response.Evidence = []CandidateEvidence{{ID: "E-local", Kind: protocol.EvidenceDiff, Summary: "candidate", FileRefs: []string{"C:/local-only.diff"}}}
-	unsafe, err := json.Marshal(response)
+	unsafe, err := marshalCandidateResponse(response)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,6 +397,227 @@ func TestResponseValidationIsReadOnlyAndChecksPackageIdentity(t *testing.T) {
 	if _, err := ValidateResponsePackage(output, input); err == nil {
 		t.Fatal("local candidate evidence reference was accepted")
 	}
+}
+
+func readTaskFiles(t *testing.T, root string) map[string][]byte {
+	t.Helper()
+	files := map[string][]byte{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		files[relative] = data
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func TestVerifyPackageRejectsTamperedDerivedFiles(t *testing.T) {
+	fixture := newWorkingHandoffFixture(t)
+	output := filepath.Join(t.TempDir(), "handoff")
+	if _, err := fixture.service.Export(context.Background(), ExportOptions{TaskID: "T-0001", ClientID: "cc-haha", Adapter: "manual-cc-haha", DeviceID: "device-1", AfterEventID: 0, OutputDir: output}); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{"handoff.md", "candidate-response.json"}
+	original := map[string][]byte{}
+	for _, name := range paths {
+		data, err := os.ReadFile(filepath.Join(output, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		original[name] = data
+	}
+
+	handoff := append([]byte(nil), original["handoff.md"]...)
+	handoff[len(handoff)-1] ^= 1
+	if err := os.WriteFile(filepath.Join(output, "handoff.md"), handoff, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyPackage(output); err == nil {
+		t.Fatal("changed handoff.md passed verification")
+	}
+	if err := os.WriteFile(filepath.Join(output, "handoff.md"), original["handoff.md"], 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := VerifyPackage(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := NewCandidateResponse(manifest)
+	template.ProposedAction = protocol.Submit
+	data, err := marshalCandidateResponse(template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(output, "candidate-response.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyPackage(output); err == nil {
+		t.Fatal("changed template proposed_action passed verification")
+	}
+	template = NewCandidateResponse(manifest)
+	template.Message = "changed template message"
+	data, err = marshalCandidateResponse(template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(output, "candidate-response.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyPackage(output); err == nil {
+		t.Fatal("changed template message passed verification")
+	}
+}
+
+func TestCandidateResponseActionSemantics(t *testing.T) {
+	fixture := newWorkingHandoffFixture(t)
+	output := filepath.Join(t.TempDir(), "handoff")
+	if _, err := fixture.service.Export(context.Background(), ExportOptions{TaskID: "T-0001", ClientID: "cc-haha", Adapter: "manual-cc-haha", DeviceID: "device-1", AfterEventID: 0, OutputDir: output}); err != nil {
+		t.Fatal(err)
+	}
+	base, err := VerifyPackage(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateEvidence := func() []CandidateEvidence {
+		return []CandidateEvidence{
+			{ID: "E-new-diff", Kind: protocol.EvidenceDiff, Summary: "New diff", FileRefs: []string{"changes/fix.diff"}},
+			{ID: "E-new-test", Kind: protocol.EvidenceTest, Summary: "New tests", FileRefs: []string{"reports/test.txt"}},
+		}
+	}
+	cases := []struct {
+		name   string
+		action protocol.Action
+		mutate func(*CandidateResponse)
+		valid  bool
+	}{
+		{"assign missing assignee", protocol.Assign, func(*CandidateResponse) {}, false},
+		{"request changes missing feedback", protocol.RequestChanges, func(*CandidateResponse) {}, false},
+		{"message missing body", protocol.Message, func(*CandidateResponse) {}, false},
+		{"add evidence missing evidence", protocol.AddEvidence, func(*CandidateResponse) {}, false},
+		{"submit missing diff", protocol.Submit, func(response *CandidateResponse) { response.EvidenceRefs = []string{"E-test"} }, false},
+		{"submit missing test", protocol.Submit, func(response *CandidateResponse) { response.EvidenceRefs = []string{"E-diff"} }, false},
+		{"submit unknown evidence", protocol.Submit, func(response *CandidateResponse) { response.EvidenceRefs = []string{"E-unknown"} }, false},
+		{"submit candidate evidence", protocol.Submit, func(response *CandidateResponse) {
+			response.Evidence = candidateEvidence()
+			response.EvidenceRefs = []string{"E-new-diff", "E-new-test"}
+		}, true},
+		{"submit announced evidence", protocol.Submit, func(response *CandidateResponse) { response.EvidenceRefs = []string{"E-diff", "E-test"} }, true},
+		{"block missing blocker", protocol.Block, func(response *CandidateResponse) { response.EvidenceRefs = []string{"E-diff"} }, false},
+		{"approve has payload", protocol.Approve, func(response *CandidateResponse) { response.Message = "irrelevant" }, false},
+		{"candidate conflicts with manifest evidence", protocol.AddEvidence, func(response *CandidateResponse) {
+			response.Evidence = []CandidateEvidence{{ID: "E-diff", Kind: protocol.EvidenceDiff, Summary: "Conflict", FileRefs: []string{"changes/fix.diff"}}}
+		}, false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			manifest := manifestForAction(t, base, testCase.action)
+			response := NewCandidateResponse(manifest)
+			response.ProposedAction = testCase.action
+			testCase.mutate(&response)
+			err := ValidateCandidateResponse(manifest, response)
+			if (err == nil) != testCase.valid {
+				t.Fatalf("ValidateCandidateResponse() error = %v, valid = %t", err, testCase.valid)
+			}
+		})
+	}
+}
+
+func TestDecodeCandidateResponseRequiresSchemaFields(t *testing.T) {
+	fixture := newWorkingHandoffFixture(t)
+	output := filepath.Join(t.TempDir(), "handoff")
+	if _, err := fixture.service.Export(context.Background(), ExportOptions{TaskID: "T-0001", ClientID: "cc-haha", Adapter: "manual-cc-haha", DeviceID: "device-1", AfterEventID: 0, OutputDir: output}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(output, "candidate-response.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	delete(fields, "message")
+	invalid, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeCandidateResponse(invalid); err == nil {
+		t.Fatal("candidate response without required field was accepted")
+	}
+}
+
+func TestCommandPlanCarriesActionPayloads(t *testing.T) {
+	fixture := newWorkingHandoffFixture(t)
+	output := filepath.Join(t.TempDir(), "handoff")
+	if _, err := fixture.service.Export(context.Background(), ExportOptions{TaskID: "T-0001", ClientID: "cc-haha", Adapter: "manual-cc-haha", DeviceID: "device-1", AfterEventID: 0, OutputDir: output}); err != nil {
+		t.Fatal(err)
+	}
+	base, err := VerifyPackage(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name     string
+		action   protocol.Action
+		mutate   func(*CandidateResponse)
+		wantArgs []string
+		steps    int
+	}{
+		{"assign", protocol.Assign, func(response *CandidateResponse) { response.NextAssignee = "new-executor" }, []string{"task", "assign", "--task", "T-0001", "--client", "new-executor", "--expected-version", "5"}, 1},
+		{"message", protocol.Message, func(response *CandidateResponse) { response.Message = "Need details" }, []string{"message", "add", "--task", "T-0001", "--actor", "cc-haha", "--body", "Need details", "--expected-version", "5"}, 1},
+		{"evidence", protocol.AddEvidence, func(response *CandidateResponse) {
+			response.Evidence = []CandidateEvidence{{ID: "E-note", Kind: protocol.EvidenceArtifact, Summary: "Artifact", FileRefs: []string{"reports/test.txt"}}}
+		}, []string{"evidence", "add", "--task", "T-0001", "--id", "E-note", "--kind", "artifact", "--summary", "Artifact", "--created-by", "cc-haha", "--file-ref", "reports/test.txt", "--expected-version", "5"}, 1},
+		{"block", protocol.Block, func(response *CandidateResponse) {
+			response.Evidence = []CandidateEvidence{{ID: "E-block", Kind: protocol.EvidenceBlocker, Summary: "Blocked", FileRefs: []string{"reports/test.txt"}}}
+			response.EvidenceRefs = []string{"E-block"}
+		}, []string{"task", "block", "--task", "T-0001", "--actor", "cc-haha", "--evidence", "E-block", "--expected-version", "6"}, 2},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			manifest := manifestForAction(t, base, testCase.action)
+			response := NewCandidateResponse(manifest)
+			response.ProposedAction = testCase.action
+			testCase.mutate(&response)
+			if err := ValidateCandidateResponse(manifest, response); err != nil {
+				t.Fatal(err)
+			}
+			steps := commandPlan(manifest, response)
+			if len(steps) != testCase.steps || !reflect.DeepEqual(steps[len(steps)-1].Args, testCase.wantArgs) {
+				t.Fatalf("steps = %+v", steps)
+			}
+		})
+	}
+}
+
+func manifestForAction(t *testing.T, manifest Manifest, action protocol.Action) Manifest {
+	t.Helper()
+	manifest.AllowedActions = []protocol.Action{action}
+	packageID, err := manifest.ComputedPackageID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.PackageID = packageID
+	if err := manifest.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return manifest
 }
 
 func TestPublisherReportsUnknownOutcomeAfterPostPublishVerification(t *testing.T) {

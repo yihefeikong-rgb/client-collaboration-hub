@@ -244,7 +244,11 @@ func (adapter ManualCodexAdapter) Export(ctx context.Context, snapshot store.Tas
 	} else if binding.TargetClient != snapshot.State.ResponsibleClient {
 		return DeliveryPackage{}, fmt.Errorf("manual-codex target is not currently responsible")
 	}
-	return buildPackage(ctx, adapter.Name(), snapshot, binding, "审查者或创建者", "仅生成候选响应 JSON；操作者审核后手工执行建议的 CLI 命令，不会控制 Codex Desktop。")
+	role := "reviewer"
+	if snapshot.State.Status == protocol.Blocked {
+		role = "creator"
+	}
+	return buildPackage(ctx, adapter.Name(), snapshot, binding, role)
 }
 
 type ManualCCHahaAdapter struct{}
@@ -258,16 +262,29 @@ func (adapter ManualCCHahaAdapter) Export(ctx context.Context, snapshot store.Ta
 	if len(snapshot.AllowedActions) == 0 {
 		return DeliveryPackage{}, fmt.Errorf("manual-cc-haha target has no permitted action")
 	}
-	return buildPackage(ctx, adapter.Name(), snapshot, binding, "被指派的执行者", "仅生成候选响应 JSON；操作者审核后手工执行建议的 CLI 命令，不会读取或控制 CC-HAHA 的内部会话、技能、MCP 或登录态。")
+	return buildPackage(ctx, adapter.Name(), snapshot, binding, "executor")
+}
+
+type ManifestTask struct {
+	Title      string   `json:"title"`
+	Objective  string   `json:"objective"`
+	Acceptance []string `json:"acceptance"`
+}
+
+type ManifestTarget struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Role string `json:"role"`
 }
 
 type Manifest struct {
 	FormatVersion      string             `json:"format_version"`
 	PackageID          string             `json:"package_id"`
 	Adapter            string             `json:"adapter"`
-	TargetClient       string             `json:"target_client"`
+	TargetData         ManifestTarget     `json:"target"`
 	ActionActor        string             `json:"action_actor"`
 	TaskID             string             `json:"task_id"`
+	TaskData           ManifestTask       `json:"task"`
 	ProjectID          string             `json:"project_id"`
 	ProjectRevision    string             `json:"project_revision,omitempty"`
 	Status             protocol.Status    `json:"status"`
@@ -292,9 +309,10 @@ type ManifestEvidence struct {
 type manifestIdentity struct {
 	FormatVersion      string             `json:"format_version"`
 	Adapter            string             `json:"adapter"`
-	TargetClient       string             `json:"target_client"`
+	TargetData         ManifestTarget     `json:"target"`
 	ActionActor        string             `json:"action_actor"`
 	TaskID             string             `json:"task_id"`
+	TaskData           ManifestTask       `json:"task"`
 	ProjectID          string             `json:"project_id"`
 	ProjectRevision    string             `json:"project_revision,omitempty"`
 	Status             protocol.Status    `json:"status"`
@@ -311,9 +329,10 @@ func (m Manifest) CanonicalPayload() ([]byte, error) {
 	return json.Marshal(manifestIdentity{
 		FormatVersion:      m.FormatVersion,
 		Adapter:            m.Adapter,
-		TargetClient:       m.TargetClient,
+		TargetData:         m.TargetData,
 		ActionActor:        m.ActionActor,
 		TaskID:             m.TaskID,
+		TaskData:           m.TaskData,
 		ProjectID:          m.ProjectID,
 		ProjectRevision:    m.ProjectRevision,
 		Status:             m.Status,
@@ -337,10 +356,16 @@ func (m Manifest) ComputedPackageID() (string, error) {
 }
 
 func (m Manifest) Validate() error {
-	if m.FormatVersion != "1" || (m.Adapter != "manual-codex" && m.Adapter != "manual-cc-haha") || !protocol.IsValidID(m.TargetClient) || !protocol.IsValidID(m.ActionActor) || !protocol.IsValidID(m.TaskID) || !protocol.IsValidID(m.ProjectID) || !protocol.IsValidID(m.ResponsibleClient) || protocol.ValidatePortableText("project revision", m.ProjectRevision) != nil {
+	if m.FormatVersion != "1" || (m.Adapter != "manual-codex" && m.Adapter != "manual-cc-haha") || !protocol.IsValidID(m.ActionActor) || !protocol.IsValidID(m.TaskID) || !protocol.IsValidID(m.ProjectID) || !protocol.IsValidID(m.ResponsibleClient) || protocol.ValidatePortableText("project revision", m.ProjectRevision) != nil {
 		return fmt.Errorf("invalid handoff manifest identity")
 	}
-	if m.ActionActor != m.TargetClient || m.Version < 1 || m.FromEventExclusive < 0 || m.ThroughEvent < m.FromEventExclusive || !knownStatus(m.Status) {
+	if err := m.TargetData.Validate(); err != nil {
+		return err
+	}
+	if err := m.TaskData.Validate(); err != nil {
+		return err
+	}
+	if m.ActionActor != m.TargetData.ID || m.Version < 1 || m.FromEventExclusive < 0 || m.ThroughEvent < m.FromEventExclusive || !knownStatus(m.Status) {
 		return fmt.Errorf("invalid handoff manifest state")
 	}
 	if !strings.HasPrefix(m.PackageID, "sha256:") || len(m.PackageID) != len("sha256:")+64 {
@@ -385,6 +410,45 @@ func (m Manifest) Validate() error {
 	return nil
 }
 
+func (task ManifestTask) Validate() error {
+	if strings.TrimSpace(task.Title) == "" || strings.TrimSpace(task.Objective) == "" || len(task.Acceptance) == 0 {
+		return fmt.Errorf("invalid manifest task")
+	}
+	for _, value := range []struct {
+		field string
+		text  string
+	}{
+		{"task title", task.Title},
+		{"task objective", task.Objective},
+	} {
+		if err := protocol.ValidatePortableText(value.field, value.text); err != nil {
+			return fmt.Errorf("invalid manifest task")
+		}
+	}
+	for _, criterion := range task.Acceptance {
+		if strings.TrimSpace(criterion) == "" || protocol.ValidatePortableText("task acceptance", criterion) != nil {
+			return fmt.Errorf("invalid manifest task")
+		}
+	}
+	return nil
+}
+
+func (target ManifestTarget) Validate() error {
+	if !protocol.IsValidID(target.ID) || strings.TrimSpace(target.Name) == "" || protocol.ValidatePortableText("target name", target.Name) != nil || !knownTargetRole(target.Role) {
+		return fmt.Errorf("invalid manifest target")
+	}
+	return nil
+}
+
+func knownTargetRole(role string) bool {
+	switch role {
+	case "creator", "executor", "reviewer":
+		return true
+	default:
+		return false
+	}
+}
+
 func DecodeManifest(data []byte) (Manifest, error) {
 	var manifest Manifest
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -402,16 +466,17 @@ func DecodeManifest(data []byte) (Manifest, error) {
 	return manifest, nil
 }
 
-func buildPackage(_ context.Context, adapter string, snapshot store.TaskSnapshot, binding BindingView, role, outputRequirement string) (DeliveryPackage, error) {
+func buildPackage(_ context.Context, adapter string, snapshot store.TaskSnapshot, binding BindingView, role string) (DeliveryPackage, error) {
 	if snapshot.ActionActor != binding.TargetClient || binding.ActionActor != binding.TargetClient {
 		return DeliveryPackage{}, fmt.Errorf("handoff action actor does not match target")
 	}
 	manifest := Manifest{
 		FormatVersion:      "1",
 		Adapter:            adapter,
-		TargetClient:       binding.TargetClient,
+		TargetData:         ManifestTarget{ID: binding.TargetClient, Name: binding.TargetClientName, Role: role},
 		ActionActor:        binding.ActionActor,
 		TaskID:             snapshot.Task.ID,
+		TaskData:           ManifestTask{Title: snapshot.Task.Title, Objective: snapshot.Task.Objective, Acceptance: append([]string(nil), snapshot.Task.Acceptance...)},
 		ProjectID:          snapshot.Project.ID,
 		ProjectRevision:    binding.Revision,
 		Status:             snapshot.State.Status,
@@ -438,19 +503,18 @@ func buildPackage(_ context.Context, adapter string, snapshot store.TaskSnapshot
 	if err != nil {
 		return DeliveryPackage{}, err
 	}
-	candidate := NewCandidateResponse(manifest)
-	candidateData, err := json.MarshalIndent(candidate, "", "  ")
+	candidateData, err := marshalCandidateResponse(NewCandidateResponse(manifest))
 	if err != nil {
 		return DeliveryPackage{}, err
 	}
-	handoffData, err := renderHandoff(manifest, snapshot, binding, role, outputRequirement)
+	handoffData, err := renderHandoff(manifest)
 	if err != nil {
 		return DeliveryPackage{}, err
 	}
 	return DeliveryPackage{
 		Handoff:                 handoffData,
 		Manifest:                append(manifestData, '\n'),
-		CandidateResponse:       append(candidateData, '\n'),
+		CandidateResponse:       candidateData,
 		CandidateResponseSchema: CandidateResponseSchema(),
 	}, nil
 }

@@ -43,31 +43,80 @@ run_json evidence add --task T-0001 --id E-diff --kind diff --summary Diff --cre
 run_json evidence add --task T-0001 --id E-test --kind test --summary Tests --created-by cc-haha --file-ref reports/test.txt --expected-version 4
 execution_package="$workspace/handoff-execution"
 run_json handoff export --task T-0001 --client cc-haha --adapter manual-cc-haha --device device-1 --after-event 0 --output "$execution_package"
-run_json response validate --package "$execution_package" --input "$execution_package/candidate-response.json"
-run_json task submit --task T-0001 --actor cc-haha --evidence E-diff --evidence E-test --expected-version 5
+execution_response="$workspace/candidate-response.cc-haha.json"
+python3 - "$execution_package/candidate-response.json" "$execution_response" <<'PY'
+import json
+import pathlib
+import sys
+
+template, output = map(pathlib.Path, sys.argv[1:])
+response = json.loads(template.read_text(encoding="utf-8"))
+response["proposed_action"] = "submit"
+response["evidence_refs"] = ["E-candidate-diff", "E-candidate-test"]
+response["evidence"] = [
+    {"id": "E-candidate-diff", "kind": "diff", "summary": "Candidate diff", "file_refs": ["changes/fix.diff"]},
+    {"id": "E-candidate-test", "kind": "test", "summary": "Candidate tests", "file_refs": ["reports/test.txt"]},
+]
+output.write_text(json.dumps(response, indent=2) + "\n", encoding="utf-8")
+PY
+run_json response validate --package "$execution_package" --input "$execution_response"
+cp "$temp_root/last.json" "$temp_root/execution-validation.json"
+# The validator is read-only. The operator explicitly runs every reviewed step.
+run_json evidence add --task T-0001 --id E-candidate-diff --kind diff --summary "Candidate diff" --created-by cc-haha --file-ref changes/fix.diff --expected-version 5
+run_json evidence add --task T-0001 --id E-candidate-test --kind test --summary "Candidate tests" --created-by cc-haha --file-ref reports/test.txt --expected-version 6
+run_json task submit --task T-0001 --actor cc-haha --evidence E-candidate-diff --evidence E-candidate-test --expected-version 7
 review_package="$workspace/handoff-review"
 run_json handoff export --task T-0001 --client codex --adapter manual-codex --device device-1 --after-event 0 --output "$review_package"
-run_json review request-changes --task T-0001 --actor codex --body "Revise output" --expected-version 6
+review_response="$workspace/candidate-response.codex-review.json"
+python3 - "$review_package/candidate-response.json" "$review_response" <<'PY'
+import json
+import pathlib
+import sys
+
+template, output = map(pathlib.Path, sys.argv[1:])
+response = json.loads(template.read_text(encoding="utf-8"))
+response["proposed_action"] = "request_changes"
+response["feedback"] = "Revise output"
+output.write_text(json.dumps(response, indent=2) + "\n", encoding="utf-8")
+PY
+run_json response validate --package "$review_package" --input "$review_response"
+cp "$temp_root/last.json" "$temp_root/review-validation.json"
+run_json review request-changes --task T-0001 --actor codex --body "Revise output" --expected-version 8
 revision_package="$workspace/handoff-revision"
-run_json handoff export --task T-0001 --client cc-haha --adapter manual-cc-haha --device device-1 --after-event 6 --output "$revision_package"
-run_json task resume --task T-0001 --actor cc-haha --expected-version 7
-run_json task submit --task T-0001 --actor cc-haha --evidence E-diff --evidence E-test --expected-version 8
-run_json review approve --task T-0001 --actor codex --expected-version 9
+run_json handoff export --task T-0001 --client cc-haha --adapter manual-cc-haha --device device-1 --after-event 8 --output "$revision_package"
+run_json task resume --task T-0001 --actor cc-haha --expected-version 9
+run_json task submit --task T-0001 --actor cc-haha --evidence E-candidate-diff --evidence E-candidate-test --expected-version 10
+approval_package="$workspace/handoff-approve"
+run_json handoff export --task T-0001 --client codex --adapter manual-codex --device device-1 --after-event 10 --output "$approval_package"
+approval_response="$workspace/candidate-response.codex-approve.json"
+python3 - "$approval_package/candidate-response.json" "$approval_response" <<'PY'
+import json
+import pathlib
+import sys
+
+template, output = map(pathlib.Path, sys.argv[1:])
+response = json.loads(template.read_text(encoding="utf-8"))
+response["proposed_action"] = "approve"
+output.write_text(json.dumps(response, indent=2) + "\n", encoding="utf-8")
+PY
+run_json response validate --package "$approval_package" --input "$approval_response"
+cp "$temp_root/last.json" "$temp_root/approval-validation.json"
+run_json review approve --task T-0001 --actor codex --expected-version 11
 run_json status --task T-0001 --device device-1
 cp "$temp_root/last.json" "$temp_root/status.json"
 
-python3 - "$execution_package" "$review_package" "$revision_package" "$project_path" "$temp_root/status.json" <<'PY'
+python3 - "$execution_package" "$review_package" "$revision_package" "$approval_package" "$project_path" "$temp_root/status.json" "$temp_root/execution-validation.json" "$temp_root/review-validation.json" "$temp_root/approval-validation.json" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
-execution, review, revision, project, status_path = map(pathlib.Path, sys.argv[1:])
+execution, review, revision, approval, project, status_path, execution_validation_path, review_validation_path, approval_validation_path = map(pathlib.Path, sys.argv[1:])
 status = json.loads(status_path.read_text(encoding="utf-8"))
 assert status["health"] == "HEALTHY"
 assert status["state"]["status"] == "DONE"
 assert status["binding_available"] is True
-for package in (execution, review, revision):
+for package in (execution, review, revision, approval):
     manifest_path = package / "manifest.json"
     handoff_path = package / "handoff.md"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -81,7 +130,17 @@ expected = hashlib.sha256((project / "changes" / "fix.diff").read_bytes()).hexdi
 execution_manifest = json.loads((execution / "manifest.json").read_text(encoding="utf-8"))
 assert execution_manifest["evidence"][0]["files"][0]["sha256"] == expected
 revision_manifest = json.loads((revision / "manifest.json").read_text(encoding="utf-8"))
-assert [event["event_id"] for event in revision_manifest["events"]] == [7]
+assert [event["event_id"] for event in revision_manifest["events"]] == [9]
+execution_validation = json.loads(execution_validation_path.read_text(encoding="utf-8"))
+assert [step["program"] for step in execution_validation["steps"]] == ["collab", "collab", "collab"]
+assert "E-candidate-diff" in execution_validation["steps"][0]["args"]
+assert "E-candidate-test" in execution_validation["steps"][1]["args"]
+assert "submit" in execution_validation["steps"][2]["args"]
+assert not any("<" in arg or ">" in arg for step in execution_validation["steps"] for arg in step["args"])
+review_validation = json.loads(review_validation_path.read_text(encoding="utf-8"))
+assert review_validation["steps"] == [{"program": "collab", "args": ["review", "request-changes", "--task", "T-0001", "--actor", "codex", "--body", "Revise output", "--expected-version", "8"]}]
+approval_validation = json.loads(approval_validation_path.read_text(encoding="utf-8"))
+assert approval_validation["steps"] == [{"program": "collab", "args": ["review", "approve", "--task", "T-0001", "--actor", "codex", "--expected-version", "11"]}]
 PY
 
 echo "Binary CLI E2E passed: DONE with portable manual-cc-haha and manual-codex handoffs."

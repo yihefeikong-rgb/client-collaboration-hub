@@ -30,7 +30,7 @@ responsible_client、updated_at。`evidence add` 额外输出 `changed`；同一
 | `collab status` | `--task [--device] [--actor]`；显示 action_actor、该 actor 的 allowed_actions 与 binding_available，不显示 local_path |
 | `collab recover` | `--task` |
 | `collab handoff export` | `--task --client --adapter --device --after-event --output`；输出目录必须不存在 |
-| `collab response validate` | `--package <handoff-directory> --input <candidate-response.json>`；只读校验并输出命令草案 |
+| `collab response validate` | `--package <handoff-directory> --input <candidate-response.json>`；只读校验并输出结构化 `steps` |
 
 所有正式写入都经过 Journal。`evidence add` 是非业务状态事件；submit/block 只接收已公告
 Evidence ID，由 Journal 读取文件后派生真实 kind。消息与 evidence add 在非 DONE 状态仅允许
@@ -51,8 +51,10 @@ manifest 与 handoff.md 是 portable 内容，不能包含 Binding 的绝对 loc
 重试相同路径。
 
 `response validate` 不调用 Journal：它只读取已发布包和候选响应，验证 package_id、任务、
-version/cursor、actor、allowed action、schema 与 portable Evidence，成功后输出 `command_draft`。
-候选 JSON 永远不会被自动转换成 Event 或 CLI 写入。`recover` 发现 CORRUPT 时会在文本或 JSON
+version/cursor、actor、allowed action、动作级语义、schema 与 portable Evidence，成功后输出
+`steps` 数组；每项为独立的 `{program, args}`，不会生成或执行拼接的 shell 命令。文本输出仅供
+人工审核，不会自动执行。包内的空 candidate-response 模板只能用于包验证；真实响应必须在包外
+填写有效 action。候选 JSON 永远不会被自动转换成 Event 或 CLI 写入。`recover` 发现 CORRUPT 时会在文本或 JSON
 中输出 health、reason 与本地诊断 backup_path；诊断备份失败时额外显示其失败状态，不能掩盖已确认的 CORRUPT。
 
 ## 退出码

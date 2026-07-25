@@ -141,23 +141,34 @@ after_event 必须介于 0 和 last_event_id；事件严格满足 `event_id > af
 
 包固定包含 `handoff.md`、`manifest.json`、`candidate-response.json` 与
 `candidate-response.schema.json`，不允许额外文件。`package_id` 为 `sha256:` 加 canonical
-manifest payload 的 SHA-256；canonical payload 排除 package_id 本身。同一 snapshot、adapter、
-target、binding revision 与 cursor 必须给出同一 ID，事件、Evidence/file hash、版本或目标变化
-必须改变 ID。
+manifest payload 的 SHA-256；canonical payload 排除 package_id 本身。Manifest 是交接包的完整
+语义真源：除 adapter、状态、事件与 Evidence 外，还必须包含 `task`（title、objective、
+acceptance）和 `target`（id、name、role）。这些字段全部参与 package_id。同一输入必须生成
+完全相同的四个文件；任务、目标、事件、Evidence/file hash、版本或目标变化必须改变 ID。
 
 导出前扫描所有可迁移内容中的凭据、本机路径、file URI 和控制字符；命中时只报告来源 ID，
 不输出疑似秘密。输出目录必须不存在，且不能是仓库根、`collaboration/`、其下路径、已有文件
 或已有符号链接。发布器不重命名、移动、删除或覆盖已有目录；发布后重新严格验证四个文件、
-manifest、schema、模板、package_id 与目录无额外文件。后验验证失败返回
+manifest、由 Manifest 重新渲染的 handoff.md、严格等于初始模板的 candidate-response.json、
+schema、package_id 与目录无额外文件。后验验证失败返回
 `ErrHandoffOutcomeUnknown`，目录保留，不能对同一路径盲目重试。
 
 `handoff.md` 固定包括协议边界、目标客户端、目标、验收、状态、责任方、事件、Evidence、
-相对文件校验值、允许动作、建议 CLI 回写命令和客户端输出要求。任务目标、验收、历史
+相对文件校验值、允许动作、回写方式和客户端输出要求。它只接收已验证 Manifest；固定的
+adapter 输出要求由 Manifest.adapter 推导。任务目标、验收、历史
 Event body 与 Evidence summary 均按缩进 JSON data block 渲染，不能创建新的协议标题或关闭
-Markdown fence。manifest format_version 为 `1`，并记录 adapter、target_client、action_actor、
+Markdown fence。manifest format_version 为 `1`，并记录 adapter、target、action_actor、
 任务/项目、revision、状态、版本、游标、责任方、allowed_actions、事件增量与 Evidence 索引。
 
-`candidate-response.json` 只是候选数据，绝不自动写入 Journal。`collab response validate`
-只读取包和输入，校验 schema、package_id、task、观察到的 version/cursor、actor、allowed action
-以及 Evidence 的 portable 内容；成功时只输出供操作者审核的 CLI 命令草案。它不创建 Evidence、
-不改变 State，也不执行客户端动作。
+包内的 `candidate-response.json` 只能是未填写的严格初始模板：action、next_assignee、message、
+feedback 为空，evidence_refs 与 evidence 为非 null 的空数组。它用于包完整性校验，不能直接通过
+`response validate`。包外的真实候选响应包含 next_assignee、message、feedback、evidence_refs 与
+candidate evidence，并按 action 语义校验：assign 必须给合法 next_assignee；message/request_changes/
+evidence_add 分别只给非空 message/feedback/evidence；submit 必须引用至少一项 diff 或 artifact 和
+一项 test；block 必须引用 blocker；accept/resume/approve 不得携带 payload。引用只能来自 Manifest
+已公告 Evidence 或当前候选 Evidence，且 ID 不可重复或冲突。
+
+`collab response validate` 只读取包和输入，校验 schema、package_id、task、观察到的
+version/cursor、actor、allowed action、动作语义与 portable Evidence；成功时输出
+`steps: [{program, args}]`。每个参数都保留为独立 args 元素，文本模式明确标记“仅供人工审核，
+不会自动执行”。它不创建 Evidence、不改变 State，也不执行客户端动作。

@@ -244,8 +244,26 @@ func TestCLIBindingStatusAndManualHandoff(t *testing.T) {
 	if err != nil || strings.Contains(string(ccHandoff), projectPath) {
 		t.Fatalf("manual-cc-haha package = %s, %v", ccHandoff, err)
 	}
-	run("response", "validate", "--package", "handoff-cc", "--input", filepath.Join(root, "handoff-cc", "candidate-response.json"))
-	if !strings.Contains(stdout.String(), "command_draft") {
+	template, err := os.ReadFile(filepath.Join(root, "handoff-cc", "candidate-response.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(template, &response); err != nil {
+		t.Fatal(err)
+	}
+	response["proposed_action"] = "submit"
+	response["evidence_refs"] = []string{"E-diff", "E-test"}
+	data, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responsePath := filepath.Join(root, "candidate-response.cc-haha.json")
+	if err := os.WriteFile(responsePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("response", "validate", "--package", "handoff-cc", "--input", responsePath)
+	if !strings.Contains(stdout.String(), "\"steps\"") || strings.Contains(stdout.String(), "command_draft") {
 		t.Fatalf("response validation output = %s", stdout.String())
 	}
 	run("task", "submit", "--task", "T-0005", "--actor", "cc-haha", "--evidence", "E-diff", "--evidence", "E-test", "--expected-version", "5")

@@ -58,19 +58,50 @@ try {
         Invoke-CollabJson @("evidence", "add", "--task", "T-0001", "--id", "E-test", "--kind", "test", "--summary", "Tests", "--created-by", "cc-haha", "--file-ref", "reports/test.txt", "--expected-version", "4") | Out-Null
         $executionPackage = Join-Path $workspace "handoff-execution"
         Invoke-CollabJson @("handoff", "export", "--task", "T-0001", "--client", "cc-haha", "--adapter", "manual-cc-haha", "--device", "device-1", "--after-event", "0", "--output", $executionPackage) | Out-Null
-        $response = Invoke-CollabJson @("response", "validate", "--package", $executionPackage, "--input", (Join-Path $executionPackage "candidate-response.json"))
-        if (-not $response.Value.command_draft.Contains("collab task submit")) {
-            throw "candidate response did not produce a submit command draft"
+        $executionResponse = Join-Path $workspace "candidate-response.cc-haha.json"
+        $candidate = Get-Content -LiteralPath (Join-Path $executionPackage "candidate-response.json") -Raw | ConvertFrom-Json -ErrorAction Stop
+        $candidate.proposed_action = "submit"
+        $candidate.evidence_refs = @("E-candidate-diff", "E-candidate-test")
+        $candidate.evidence = @(
+            [pscustomobject]@{ id = "E-candidate-diff"; kind = "diff"; summary = "Candidate diff"; file_refs = @("changes/fix.diff") },
+            [pscustomobject]@{ id = "E-candidate-test"; kind = "test"; summary = "Candidate tests"; file_refs = @("reports/test.txt") }
+        )
+        $candidate | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $executionResponse -NoNewline
+        $response = Invoke-CollabJson @("response", "validate", "--package", $executionPackage, "--input", $executionResponse)
+        if ($response.Value.steps.Count -ne 3 -or $response.Value.steps[0].program -ne "collab" -or -not ($response.Value.steps[0].args -contains "E-candidate-diff") -or -not ($response.Value.steps[1].args -contains "E-candidate-test") -or -not ($response.Value.steps[2].args -contains "submit")) {
+            throw "candidate response did not produce the expected structured steps"
         }
-        Invoke-CollabJson @("task", "submit", "--task", "T-0001", "--actor", "cc-haha", "--evidence", "E-diff", "--evidence", "E-test", "--expected-version", "5") | Out-Null
+        # The validator is read-only. The operator explicitly runs every reviewed step.
+        Invoke-CollabJson @("evidence", "add", "--task", "T-0001", "--id", "E-candidate-diff", "--kind", "diff", "--summary", "Candidate diff", "--created-by", "cc-haha", "--file-ref", "changes/fix.diff", "--expected-version", "5") | Out-Null
+        Invoke-CollabJson @("evidence", "add", "--task", "T-0001", "--id", "E-candidate-test", "--kind", "test", "--summary", "Candidate tests", "--created-by", "cc-haha", "--file-ref", "reports/test.txt", "--expected-version", "6") | Out-Null
+        Invoke-CollabJson @("task", "submit", "--task", "T-0001", "--actor", "cc-haha", "--evidence", "E-candidate-diff", "--evidence", "E-candidate-test", "--expected-version", "7") | Out-Null
         $reviewPackage = Join-Path $workspace "handoff-review"
         Invoke-CollabJson @("handoff", "export", "--task", "T-0001", "--client", "codex", "--adapter", "manual-codex", "--device", "device-1", "--after-event", "0", "--output", $reviewPackage) | Out-Null
-        Invoke-CollabJson @("review", "request-changes", "--task", "T-0001", "--actor", "codex", "--body", "Revise output", "--expected-version", "6") | Out-Null
+        $reviewResponse = Join-Path $workspace "candidate-response.codex-review.json"
+        $candidate = Get-Content -LiteralPath (Join-Path $reviewPackage "candidate-response.json") -Raw | ConvertFrom-Json -ErrorAction Stop
+        $candidate.proposed_action = "request_changes"
+        $candidate.feedback = "Revise output"
+        $candidate | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reviewResponse -NoNewline
+        $response = Invoke-CollabJson @("response", "validate", "--package", $reviewPackage, "--input", $reviewResponse)
+        if ($response.Value.steps.Count -ne 1 -or $response.Value.steps[0].args -notcontains "Revise output") {
+            throw "request_changes response did not preserve feedback"
+        }
+        Invoke-CollabJson @("review", "request-changes", "--task", "T-0001", "--actor", "codex", "--body", "Revise output", "--expected-version", "8") | Out-Null
         $revisionPackage = Join-Path $workspace "handoff-revision"
-        Invoke-CollabJson @("handoff", "export", "--task", "T-0001", "--client", "cc-haha", "--adapter", "manual-cc-haha", "--device", "device-1", "--after-event", "6", "--output", $revisionPackage) | Out-Null
-        Invoke-CollabJson @("task", "resume", "--task", "T-0001", "--actor", "cc-haha", "--expected-version", "7") | Out-Null
-        Invoke-CollabJson @("task", "submit", "--task", "T-0001", "--actor", "cc-haha", "--evidence", "E-diff", "--evidence", "E-test", "--expected-version", "8") | Out-Null
-        Invoke-CollabJson @("review", "approve", "--task", "T-0001", "--actor", "codex", "--expected-version", "9") | Out-Null
+        Invoke-CollabJson @("handoff", "export", "--task", "T-0001", "--client", "cc-haha", "--adapter", "manual-cc-haha", "--device", "device-1", "--after-event", "8", "--output", $revisionPackage) | Out-Null
+        Invoke-CollabJson @("task", "resume", "--task", "T-0001", "--actor", "cc-haha", "--expected-version", "9") | Out-Null
+        Invoke-CollabJson @("task", "submit", "--task", "T-0001", "--actor", "cc-haha", "--evidence", "E-candidate-diff", "--evidence", "E-candidate-test", "--expected-version", "10") | Out-Null
+        $approvalPackage = Join-Path $workspace "handoff-approve"
+        Invoke-CollabJson @("handoff", "export", "--task", "T-0001", "--client", "codex", "--adapter", "manual-codex", "--device", "device-1", "--after-event", "10", "--output", $approvalPackage) | Out-Null
+        $approvalResponse = Join-Path $workspace "candidate-response.codex-approve.json"
+        $candidate = Get-Content -LiteralPath (Join-Path $approvalPackage "candidate-response.json") -Raw | ConvertFrom-Json -ErrorAction Stop
+        $candidate.proposed_action = "approve"
+        $candidate | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $approvalResponse -NoNewline
+        $response = Invoke-CollabJson @("response", "validate", "--package", $approvalPackage, "--input", $approvalResponse)
+        if ($response.Value.steps.Count -ne 1 -or $response.Value.steps[0].args -notcontains "approve") {
+            throw "approve response did not produce an approval step"
+        }
+        Invoke-CollabJson @("review", "approve", "--task", "T-0001", "--actor", "codex", "--expected-version", "11") | Out-Null
         $status = Invoke-CollabJson @("status", "--task", "T-0001", "--device", "device-1")
     } finally {
         Pop-Location
@@ -79,7 +110,7 @@ try {
     if ($status.Value.health -ne "HEALTHY" -or $status.Value.state.status -ne "DONE" -or -not $status.Value.binding_available) {
         throw "unexpected final status: $($status.Text)"
     }
-    foreach ($packagePath in @($executionPackage, $reviewPackage, $revisionPackage)) {
+    foreach ($packagePath in @($executionPackage, $reviewPackage, $revisionPackage, $approvalPackage)) {
         $manifestPath = Join-Path $packagePath "manifest.json"
         $handoffPath = Join-Path $packagePath "handoff.md"
         $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -ErrorAction Stop
@@ -100,7 +131,7 @@ try {
         throw "evidence hash mismatch"
     }
     $revisionManifest = Get-Content -LiteralPath (Join-Path $revisionPackage "manifest.json") -Raw | ConvertFrom-Json -ErrorAction Stop
-    if ($revisionManifest.events.Count -ne 1 -or $revisionManifest.events[0].event_id -ne 7) {
+    if ($revisionManifest.events.Count -ne 1 -or $revisionManifest.events[0].event_id -ne 9) {
         throw "after-event cursor was not honored"
     }
     Write-Output "Binary CLI E2E passed: DONE with portable manual-cc-haha and manual-codex handoffs."

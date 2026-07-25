@@ -189,7 +189,12 @@ func VerifyPackage(packageDir string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
-	if handoffData, err := os.ReadFile(filepath.Join(packageDir, "handoff.md")); err != nil || len(handoffData) == 0 {
+	handoffData, err := os.ReadFile(filepath.Join(packageDir, "handoff.md"))
+	if err != nil {
+		return Manifest{}, fmt.Errorf("handoff package has invalid handoff.md")
+	}
+	expectedHandoff, err := renderHandoff(manifest)
+	if err != nil || !bytes.Equal(handoffData, expectedHandoff) {
 		return Manifest{}, fmt.Errorf("handoff package has invalid handoff.md")
 	}
 	schema, err := os.ReadFile(filepath.Join(packageDir, "candidate-response.schema.json"))
@@ -204,8 +209,12 @@ func VerifyPackage(packageDir string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
-	if err := ValidateCandidateResponse(manifest, response); err != nil {
+	if err := ValidateCandidateTemplate(manifest, response); err != nil {
 		return Manifest{}, err
+	}
+	expectedTemplate, err := marshalCandidateResponse(NewCandidateResponse(manifest))
+	if err != nil || !bytes.Equal(responseData, expectedTemplate) {
+		return Manifest{}, fmt.Errorf("handoff package has invalid candidate response template")
 	}
 	return manifest, nil
 }

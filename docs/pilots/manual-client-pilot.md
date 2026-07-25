@@ -40,9 +40,11 @@ cc-haha: execute, import_export
 3. **用户手工交给 CC-HAHA。** 用户把 `handoff.md`、`manifest.json` 与
    `candidate-response.schema.json` 的内容交给真实 CC-HAHA 客户端；不启动或连接任何客户端。
 
-4. **CC-HAHA 只生成候选 JSON。** 它把结果写到包外的
-   `candidate-response.cc-haha.json`，字段必须来自模板，最多填写 message、feedback 和
-   Evidence 候选资料。它不得写入 collaboration/、不得运行 CLI、不得声称已提交或已修改状态。
+4. **CC-HAHA 只生成候选 JSON。** 它复制模板并把结果写到包外的
+   `candidate-response.cc-haha.json`。模板本身保持不变；真实响应必须填写一个允许的
+   `proposed_action`，并仅填写该动作需要的字段。执行者提交时使用 `evidence_refs` 引用已公告
+   Evidence 或同一响应中的候选 diff/artifact 与 test Evidence。它不得写入 collaboration/、不得
+   运行 CLI、不得声称已提交或已修改状态。
 
 5. **只读校验候选响应。** 操作者运行：
 
@@ -50,11 +52,13 @@ cc-haha: execute, import_export
    collab response validate --package handoff-cc-1 --input candidate-response.cc-haha.json
    ```
 
-   成功输出的只是 `command_draft`；它不创建 Evidence，也不改变任务。
+   成功输出的是结构化 `steps`；每项含独立的 `program` 与 `args`。它不创建 Evidence、不改变
+   任务，也不执行步骤。
 
-6. **操作者手工执行正式 CLI 写入。** 先逐条审核 CC-HAHA 的候选 Evidence，使用
-   `collab evidence add` 明确写入，再使用 `collab task submit`。不要把候选 JSON 自动转换成
-   参数；每条命令使用当前 version。
+6. **操作者手工执行正式 CLI 写入。** 逐条审核 `steps`，由操作者显式复制或重新输入每条
+   `collab evidence add` 与 `collab task submit`。验证器不会自动转换或执行候选 JSON。每次
+   Evidence 写入都会推进 version，因此必须使用步骤中对应的 expected-version，或以实际 CLI
+   输出为准重新确认。
 
 7. **进入 REVIEW 并导出 manual-codex 包。** `submit` 成功后：
 
@@ -65,8 +69,9 @@ cc-haha: execute, import_export
 8. **用户手工交给 Codex Desktop。** 用户向真实 Codex Desktop 提供该包的
    `handoff.md`、`manifest.json` 与候选响应 schema；Codex Desktop 仅阅读资料和准备候选 JSON。
 
-9. **Codex 生成 approve 或 request-changes 候选。** 它只写
-   `candidate-response.codex.json`。用户通过同一个只读命令校验：
+9. **Codex 生成 approve 或 request-changes 候选。** 它只写包外的
+   `candidate-response.codex.json`；approve 不携带 payload，request-changes 必须填写 feedback。
+   用户通过同一个只读命令校验：
 
    ```text
    collab response validate --package handoff-codex-1 --input candidate-response.codex.json
@@ -84,6 +89,6 @@ cc-haha: execute, import_export
 
 ## 需要保留的试运行证据
 
-保留每个交接包的四个文件、两个候选 JSON、每一次 `response validate` 输出、每条人工 CLI
+保留每个交接包的四个文件、两个候选 JSON、每一次 `response validate` 的结构化 steps 输出、每条人工 CLI
 输出、最终 status，以及对应项目 diff 与测试结果。不要把绝对路径、令牌、会话 ID 或客户端内部
 资料复制进包或候选响应。

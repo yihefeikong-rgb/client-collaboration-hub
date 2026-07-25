@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/handoff"
@@ -66,11 +67,11 @@ type handoffOutput struct {
 }
 
 type responseValidationOutput struct {
-	PackageID      string `json:"package_id"`
-	TaskID         string `json:"task_id"`
-	ActionActor    string `json:"action_actor"`
-	ProposedAction string `json:"proposed_action"`
-	CommandDraft   string `json:"command_draft"`
+	PackageID      string                `json:"package_id"`
+	TaskID         string                `json:"task_id"`
+	ActionActor    string                `json:"action_actor"`
+	ProposedAction string                `json:"proposed_action"`
+	Steps          []handoff.CommandStep `json:"steps"`
 }
 
 func stateResult(state protocol.State) stateOutput {
@@ -176,12 +177,23 @@ func (a *App) writeHandoff(jsonOutput bool, report handoff.ExportReport) {
 }
 
 func (a *App) writeResponseValidation(jsonOutput bool, result handoff.ResponseValidation) {
-	output := responseValidationOutput{PackageID: result.Manifest.PackageID, TaskID: result.Manifest.TaskID, ActionActor: result.Manifest.ActionActor, ProposedAction: string(result.Response.ProposedAction), CommandDraft: result.CommandDraft}
+	output := responseValidationOutput{PackageID: result.Manifest.PackageID, TaskID: result.Manifest.TaskID, ActionActor: result.Manifest.ActionActor, ProposedAction: string(result.Response.ProposedAction), Steps: result.Steps}
 	if jsonOutput {
 		_ = json.NewEncoder(a.Stdout).Encode(output)
 		return
 	}
-	fmt.Fprintf(a.Stdout, "package_id: %s\ntask_id: %s\naction_actor: %s\nproposed_action: %s\ncommand_draft: %s\n", output.PackageID, output.TaskID, output.ActionActor, output.ProposedAction, output.CommandDraft)
+	fmt.Fprintf(a.Stdout, "package_id: %s\ntask_id: %s\naction_actor: %s\nproposed_action: %s\n仅供人工审核，不会自动执行：\n", output.PackageID, output.TaskID, output.ActionActor, output.ProposedAction)
+	for index, step := range output.Steps {
+		fmt.Fprintf(a.Stdout, "%d. %s\n", index+1, formatCommandStep(step))
+	}
+}
+
+func formatCommandStep(step handoff.CommandStep) string {
+	parts := append([]string{step.Program}, step.Args...)
+	for index, part := range parts {
+		parts[index] = strconv.Quote(part)
+	}
+	return strings.Join(parts, " ")
 }
 
 func actionsToStrings(actions []protocol.Action) []string {

@@ -46,17 +46,29 @@ Query 按明确的 `action_actor` 生成 allowed actions；Handoff 使用目标�
 ## 交接包与候选响应
 
 包固定包含 `handoff.md`、`manifest.json`、`candidate-response.json` 和
-`candidate-response.schema.json`，且不允许额外文件。manifest 的 `package_id` 是
-`sha256:` 加 canonical JSON 后的 SHA-256；canonical payload 排除 `package_id` 自身且只含
-可迁移、确定排序的字段。因此同一 snapshot、adapter、target、binding revision 与游标会得到
-相同 ID；任一事件、Evidence/file hash、版本或目标变化都会改变 ID。
+`candidate-response.schema.json`，且不允许额外文件。Manifest 是包的完整语义真源：`task`
+包含 title、objective、acceptance，`target` 包含 id、name、role，连同 adapter、状态、事件和
+Evidence 一起进入 canonical payload。manifest 的 `package_id` 是 `sha256:` 加 canonical JSON
+后的 SHA-256；canonical payload 排除 `package_id` 自身且只含可迁移、确定排序的字段。因此同一
+输入会产生完全一致的四个文件与 ID；任一任务、目标、事件、Evidence/file hash、版本或游标变化
+都会改变 ID。
 
-候选响应只是一份待人工审核的 JSON。`collab response validate --package <dir> --input <file>`
-只读取包和输入，严格校验 schema、包身份、task/version/cursor、actor、allowed action 和
-portable Evidence；成功时仅输出可供操作者审阅的 CLI 命令草案，绝不写 Journal、创建
-Evidence 或改变 State。
+`handoff.md` 只能从已验证 Manifest 确定性生成；验证包时必须重新生成并逐字节比较。包内
+`candidate-response.json` 是严格的未填写模板，固定为空 action、空文本和非 null 空数组；验证时
+也必须与程序生成模板逐字节一致。它不能作为真实响应通过 `response validate`。
 
-Handoff Markdown 的固定标题、协议边界和命令由程序生成。所有不可信业务文本以单行 JSON
+包外候选响应是待人工审核的 JSON。`collab response validate --package <dir> --input <file>`
+只读取包和输入，严格校验 schema、包身份、task/version/cursor、actor、allowed action、动作级
+语义和 portable Evidence；成功时输出 `{program, args}` 结构化步骤，绝不写 Journal、创建
+Evidence、执行步骤或改变 State。文本模式只能标记为“仅供人工审核，不会自动执行”。
+
+`assign` 仅接受合法 next_assignee；`accept`、`resume`、`approve` 不接受业务 payload；
+`message`、`request_changes`、`evidence_add` 分别要求唯一的非空 message、feedback、evidence；
+`submit` 引用的 Evidence 必须至少覆盖 diff/artifact 和 test；`block` 至少引用 blocker。引用只能
+来自包中已公告 Evidence 或同一候选响应中的 Evidence，所有 ID、引用和文件引用都不得重复。
+
+Handoff Markdown 的固定标题、协议边界和回写说明由程序生成，adapter 输出要求只由
+Manifest.adapter 推导。所有不可信业务文本以单行 JSON
 并缩进为 Markdown data block，不进入标题、列表结构或 fenced code block，因此其中的 heading
 和 backtick 无法关闭或新增协议部分。
 
@@ -72,9 +84,10 @@ nofollow/openat/最终路径句柄验证的环境）。该限制在协议与试�
 ## 验证范围
 
 测试覆盖：禁止 force 与危险输出不变性；所有角色/状态的 Action Policy 双向一致性；BLOCKED
-creator 交接与无关客户端拒绝；DONE 终态；`import_export` capability；确定 package ID；候选
-响应与无写入验证；Markdown 注入；绑定大小、取消和变化检测；发布后验证结果未知；以及
-Windows/Ubuntu 的二进制 E2E（Ubuntu 继续运行 race）。
+creator 交接与无关客户端拒绝；DONE 终态；`import_export` capability；确定 package ID；四个
+文件的确定性、handoff/template 任意修改拒绝、候选 action 语义、实参化结构化步骤与无写入验证；
+Markdown 注入；绑定大小、取消和变化检测；发布后验证结果未知；以及 Windows/Ubuntu 的二进制
+E2E（Ubuntu 继续运行 race）。
 
 真实客户端试运行另以 runbook 定义。只有用户提供真实客户端输出后才可报告 `PILOT_PASSED`；
 本阶段的完成状态为 `PILOT_READY`。
