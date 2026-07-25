@@ -17,7 +17,7 @@ var journalTime = time.Date(2026, 7, 25, 0, 0, 0, 0, time.UTC)
 
 func TestCreateTaskCreatesAuditableInitialState(t *testing.T) {
 	journal, root := newJournal(t)
-	if err := journal.CreateTask(context.Background(), testTask("T-0001"), journalTime); err != nil {
+	if err := journal.CreateTask(context.Background(), testTask("T-0001")); err != nil {
 		t.Fatal(err)
 	}
 	report, err := journal.Inspect(context.Background(), "T-0001")
@@ -27,7 +27,7 @@ func TestCreateTaskCreatesAuditableInitialState(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "tasks", "T-0001", "task.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	if err := journal.CreateTask(context.Background(), testTask("T-0001"), journalTime); err == nil {
+	if err := journal.CreateTask(context.Background(), testTask("T-0001")); err == nil {
 		t.Fatal("duplicate task accepted")
 	}
 }
@@ -229,11 +229,21 @@ func (f *faultFile) Write(data []byte) (int, error) {
 func newJournal(t *testing.T) (*FileTaskJournal, string) {
 	t.Helper()
 	root := t.TempDir()
-	return NewFileTaskJournal(root, FlockLocker{}), root
+	registry := NewFileRegistryStore(root, FlockLocker{})
+	if err := registry.CreateProject(context.Background(), protocol.Project{ID: "project-1", Name: "Test", CreatedAt: journalTime}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RegisterClient(context.Background(), protocol.Client{ID: "codex", Name: "Codex", Capabilities: []string{"create_task", "review"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RegisterClient(context.Background(), protocol.Client{ID: "cc-haha", Name: "CC-HAHA", Capabilities: []string{"execute"}}); err != nil {
+		t.Fatal(err)
+	}
+	return NewFileTaskJournal(root, FlockLocker{}, registry), root
 }
 func createTask(t *testing.T, journal *FileTaskJournal, taskID string) {
 	t.Helper()
-	if err := journal.CreateTask(context.Background(), testTask(taskID), journalTime); err != nil {
+	if err := journal.CreateTask(context.Background(), testTask(taskID)); err != nil {
 		t.Fatal(err)
 	}
 }

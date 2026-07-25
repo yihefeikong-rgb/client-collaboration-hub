@@ -21,6 +21,7 @@ var (
 	ErrRecoveryRequired     = errors.New("recovery required")
 	ErrCorrupt              = errors.New("task journal is corrupt")
 	ErrCommitOutcomeUnknown = errors.New("commit outcome unknown")
+	ErrTaskNotFound         = errors.New("task not found")
 )
 
 type Health string
@@ -48,7 +49,7 @@ type RecoveryReport struct {
 
 type TaskJournal interface {
 	Inspect(context.Context, string) (HealthReport, error)
-	CreateTask(context.Context, protocol.Task, time.Time) error
+	CreateTask(context.Context, protocol.Task) error
 	CommitTransition(context.Context, string, int64, protocol.TransitionRequest, []string) (protocol.State, error)
 	AppendMessage(context.Context, string, int64, string, string, time.Time) (protocol.State, error)
 	RecoverTail(context.Context, string) (RecoveryReport, error)
@@ -104,20 +105,22 @@ func fileName(file *os.File) string {
 }
 
 type FileTaskJournal struct {
-	Root     string
-	Locks    ScopedLocks
-	FS       FileSystem
-	Replacer AtomicReplacer
-	Now      func() time.Time
+	Root       string
+	Locks      ScopedLocks
+	FS         FileSystem
+	Replacer   AtomicReplacer
+	Now        func() time.Time
+	References protocol.References
 }
 
-func NewFileTaskJournal(root string, locker Locker) *FileTaskJournal {
+func NewFileTaskJournal(root string, locker Locker, references protocol.References) *FileTaskJournal {
 	return &FileTaskJournal{
-		Root:     root,
-		Locks:    ScopedLocks{Root: root, Locker: locker},
-		FS:       osFileSystem{},
-		Replacer: osReplacer{},
-		Now:      time.Now,
+		Root:       root,
+		Locks:      ScopedLocks{Root: root, Locker: locker},
+		FS:         osFileSystem{},
+		Replacer:   osReplacer{},
+		Now:        time.Now,
+		References: references,
 	}
 }
 
@@ -130,11 +133,11 @@ func (j *FileTaskJournal) Inspect(ctx context.Context, taskID string) (HealthRep
 	return j.inspectUnlocked(taskID)
 }
 
-func (j *FileTaskJournal) CreateTask(ctx context.Context, task protocol.Task, at time.Time) error {
-	if err := task.Validate(task.ID, nil); err != nil {
-		return err
+func (j *FileTaskJournal) CreateTask(ctx context.Context, task protocol.Task) error {
+	if j.References == nil {
+		return fmt.Errorf("task journal references are required")
 	}
-	if err := validateJournalTime(at); err != nil {
+	if err := task.Validate(task.ID, j.References); err != nil {
 		return err
 	}
 	lock, err := j.Locks.Task(ctx, task.ID)
@@ -157,8 +160,8 @@ func (j *FileTaskJournal) CreateTask(ctx context.Context, task protocol.Task, at
 		return err
 	}
 	defer os.RemoveAll(tempDir)
-	event := protocol.Event{EventID: 1, TaskID: task.ID, Type: protocol.EventTaskCreated, Actor: task.Creator, At: at, Body: task.Title, ExpectedVersion: 0}
-	state := protocol.State{TaskID: task.ID, Status: protocol.Draft, Version: 1, LastEventID: 1, ResponsibleClient: task.Creator, UpdatedAt: at}
+	event := protocol.Event{EventID: 1, TaskID: task.ID, Type: protocol.EventTaskCreated, Actor: task.Creator, At: task.CreatedAt, Body: task.Title, ExpectedVersion: 0}
+	state := protocol.State{TaskID: task.ID, Status: protocol.Draft, Version: 1, LastEventID: 1, ResponsibleClient: task.Creator, UpdatedAt: task.CreatedAt}
 	if err := j.writeTaskFiles(tempDir, task, state, event); err != nil {
 		return err
 	}
@@ -363,7 +366,7 @@ func (j *FileTaskJournal) inspectUnlocked(taskID string) (HealthReport, error) {
 	if err != nil {
 		return HealthReport{Health: Corrupt, Reason: err.Error()}, nil
 	}
-	task, err := protocol.DecodeTask(taskData, taskID+".yaml", nil)
+	task, err := protocol.DecodeTask(taskData, taskID+".yaml", j.References)
 	if err != nil {
 		return HealthReport{Health: Corrupt, Reason: err.Error()}, nil
 	}
@@ -502,7 +505,7 @@ func (j *FileTaskJournal) readTask(taskID string) (protocol.Task, error) {
 	if err != nil {
 		return task, err
 	}
-	return protocol.DecodeTask(data, taskID+".yaml", nil)
+	return protocol.DecodeTask(data, taskID+".yaml", j.References)
 }
 
 func (j *FileTaskJournal) readState(taskID string) (protocol.State, error) {
