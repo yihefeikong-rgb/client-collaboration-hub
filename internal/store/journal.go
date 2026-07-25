@@ -120,6 +120,7 @@ type FileTaskJournal struct {
 	Now        func() time.Time
 	References protocol.References
 	Evidence   EvidenceStore
+	Policy     protocol.ActionPolicy
 }
 
 func NewFileTaskJournal(root string, locker Locker, references protocol.References, evidence EvidenceStore) *FileTaskJournal {
@@ -131,6 +132,7 @@ func NewFileTaskJournal(root string, locker Locker, references protocol.Referenc
 		Now:        time.Now,
 		References: references,
 		Evidence:   evidence,
+		Policy:     protocol.DefaultActionPolicy{},
 	}
 }
 
@@ -245,8 +247,13 @@ func (j *FileTaskJournal) CommitTransition(ctx context.Context, taskID string, e
 	if intent.Action == protocol.Assign && intent.Actor == "" {
 		intent.Actor = task.Creator
 	}
-	if err := j.validateTransitionActor(intent, task, report.State); err != nil {
+	if err := j.policy().Authorize(task, report.State, intent.Actor, intent.Action, j.References); err != nil {
 		return protocol.State{}, err
+	}
+	if intent.Action == protocol.Assign {
+		if err := protocol.ValidateAssignmentTarget(intent.NextAssignee, j.References); err != nil {
+			return protocol.State{}, err
+		}
 	}
 	announcedEvidence, err := j.announcedEvidence(taskID, report.State.LastEventID)
 	if err != nil {
@@ -294,7 +301,10 @@ func (j *FileTaskJournal) AppendMessage(ctx context.Context, taskID string, expe
 	if err != nil {
 		return protocol.State{}, err
 	}
-	if !protocol.IsValidID(actor) || !j.References.ClientExists(actor) || !isTaskParticipant(actor, task, report.State) || strings.TrimSpace(body) == "" || validateJournalTime(at) != nil || at.Before(report.State.UpdatedAt) {
+	if err := j.policy().Authorize(task, report.State, actor, protocol.Message, j.References); err != nil {
+		return protocol.State{}, err
+	}
+	if strings.TrimSpace(body) == "" || validateJournalTime(at) != nil || at.Before(report.State.UpdatedAt) {
 		return protocol.State{}, fmt.Errorf("invalid message intent")
 	}
 	next := report.State
@@ -328,7 +338,10 @@ func (j *FileTaskJournal) AddEvidence(ctx context.Context, taskID string, expect
 	if err != nil {
 		return EvidenceAddResult{}, err
 	}
-	if evidence.TaskID != taskID || evidence.Validate(evidence.ID) != nil || !j.References.ClientExists(evidence.CreatedBy) || !isTaskParticipant(evidence.CreatedBy, task, report.State) {
+	if err := j.policy().Authorize(task, report.State, evidence.CreatedBy, protocol.AddEvidence, j.References); err != nil {
+		return EvidenceAddResult{}, err
+	}
+	if evidence.TaskID != taskID || evidence.Validate(evidence.ID) != nil {
 		return EvidenceAddResult{}, fmt.Errorf("invalid evidence intent")
 	}
 	if j.Evidence == nil {
@@ -424,44 +437,6 @@ func (j *FileTaskJournal) evidenceKinds(ctx context.Context, taskID string, refs
 		kinds = append(kinds, evidence.Kind)
 	}
 	return kinds, nil
-}
-
-func isTaskParticipant(actor string, task protocol.Task, state protocol.State) bool {
-	return actor == task.Creator || actor == task.Reviewer || (state.AssignedClient != "" && actor == state.AssignedClient)
-}
-
-func (j *FileTaskJournal) validateTransitionActor(intent protocol.TransitionIntent, task protocol.Task, state protocol.State) error {
-	if j.References == nil || !j.References.ClientExists(intent.Actor) {
-		return fmt.Errorf("transition actor %q is not registered", intent.Actor)
-	}
-	capability := "execute"
-	switch intent.Action {
-	case protocol.Assign:
-		if intent.Actor != task.Creator {
-			return fmt.Errorf("assign actor %q is not the task creator", intent.Actor)
-		}
-		if err := protocol.ValidateAssignmentTarget(intent.NextAssignee, j.References); err != nil {
-			return err
-		}
-		capability = "create_task"
-	case protocol.RequestChanges, protocol.Approve:
-		capability = "review"
-	case protocol.Block:
-		switch intent.Actor {
-		case task.Creator:
-			capability = "create_task"
-		case task.Reviewer:
-			capability = "review"
-		case state.AssignedClient:
-			capability = "execute"
-		default:
-			return fmt.Errorf("block actor %q is not allowed", intent.Actor)
-		}
-	}
-	if !j.References.ClientHasCapability(intent.Actor, capability) {
-		return fmt.Errorf("actor %q lacks %s capability", intent.Actor, capability)
-	}
-	return nil
 }
 
 func (j *FileTaskJournal) announcedEvidence(taskID string, lastEventID int64) (map[string]bool, error) {
@@ -626,7 +601,7 @@ func (j *FileTaskJournal) inspectJournal(data []byte, task protocol.Task, state 
 	if committed > len(events) {
 		return corruptReport(report, "state is ahead of event log"), nil
 	}
-	replayed, err := protocol.Replay(task, events[:committed], j.References, j.Evidence)
+	replayed, err := protocol.ReplayWithPolicy(task, events[:committed], j.References, j.Evidence, j.policy())
 	if err != nil || replayed != state {
 		return corruptReport(report, "state does not match replayed event chain"), nil
 	}
@@ -815,6 +790,13 @@ func writeFull(file SyncFile, data []byte) error {
 
 func (j *FileTaskJournal) taskDir(taskID string) string {
 	return filepath.Join(j.Root, "tasks", taskID)
+}
+
+func (j *FileTaskJournal) policy() protocol.ActionPolicy {
+	if j.Policy == nil {
+		return protocol.DefaultActionPolicy{}
+	}
+	return j.Policy
 }
 func (j *FileTaskJournal) statePath(taskID string) string {
 	return filepath.Join(j.taskDir(taskID), "state.json")

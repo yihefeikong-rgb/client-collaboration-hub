@@ -22,7 +22,15 @@ type App struct {
 	Handoff  *handoff.Service
 }
 
+type AppConfig struct {
+	MaxHashFileSize int64
+}
+
 func NewApp(root string, stdout, stderr io.Writer, clock func() time.Time) *App {
+	return NewAppWithConfig(root, stdout, stderr, clock, AppConfig{})
+}
+
+func NewAppWithConfig(root string, stdout, stderr io.Writer, clock func() time.Time, config AppConfig) *App {
 	if clock == nil {
 		clock = time.Now
 	}
@@ -41,7 +49,7 @@ func NewApp(root string, stdout, stderr io.Writer, clock func() time.Time) *App 
 		Bindings: bindings,
 		Journal:  journal,
 		Query:    query,
-		Handoff:  handoff.NewService(query, bindings, store.NewFileBindingResolver(), registry),
+		Handoff:  handoff.NewService(query, bindings, store.NewFileBindingResolver(store.BindingResolverConfig{MaxHashFileSize: config.MaxHashFileSize}), registry, root),
 	}
 }
 

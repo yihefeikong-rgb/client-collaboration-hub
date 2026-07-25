@@ -3,8 +3,11 @@ package handoff
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -18,6 +21,7 @@ type BindingView struct {
 	Revision         string
 	TargetClient     string
 	TargetClientName string
+	ActionActor      string
 	Evidence         []BoundEvidence
 }
 
@@ -27,8 +31,10 @@ type BoundEvidence struct {
 }
 
 type DeliveryPackage struct {
-	Handoff  []byte
-	Manifest []byte
+	Handoff                 []byte
+	Manifest                []byte
+	CandidateResponse       []byte
+	CandidateResponseSchema []byte
 }
 
 type ClientAdapter interface {
@@ -43,7 +49,6 @@ type ExportOptions struct {
 	DeviceID     string
 	AfterEventID int64
 	OutputDir    string
-	Force        bool
 }
 
 type ExportReport struct {
@@ -52,10 +57,11 @@ type ExportReport struct {
 	TaskID       string
 	ProjectID    string
 	ThroughEvent int64
+	PackageID    string
 }
 
 type Publisher interface {
-	Publish(string, DeliveryPackage, bool) error
+	Publish(string, DeliveryPackage) error
 }
 
 type Service struct {
@@ -66,8 +72,18 @@ type Service struct {
 	Publisher Publisher
 }
 
-func NewService(query store.TaskQuery, bindings store.BindingStore, resolver store.BindingResolver, registry store.RegistryStore) *Service {
-	return &Service{Query: query, Bindings: bindings, Resolver: resolver, Registry: registry, Publisher: DirectoryPublisher{}}
+func NewService(query store.TaskQuery, bindings store.BindingStore, resolver store.BindingResolver, registry store.RegistryStore, workspaceRoot ...string) *Service {
+	root := ""
+	if len(workspaceRoot) > 0 {
+		root = workspaceRoot[0]
+	}
+	return &Service{
+		Query:     query,
+		Bindings:  bindings,
+		Resolver:  resolver,
+		Registry:  registry,
+		Publisher: NewDirectoryPublisher(root),
+	}
 }
 
 func (s *Service) Export(ctx context.Context, options ExportOptions) (ExportReport, error) {
@@ -77,7 +93,7 @@ func (s *Service) Export(ctx context.Context, options ExportOptions) (ExportRepo
 	if !protocol.IsValidID(options.TaskID) || !protocol.IsValidID(options.ClientID) || !protocol.IsValidID(options.DeviceID) || options.AfterEventID < 0 || strings.TrimSpace(options.OutputDir) == "" {
 		return ExportReport{}, fmt.Errorf("invalid handoff export options")
 	}
-	snapshot, err := s.Query.Snapshot(ctx, options.TaskID, options.AfterEventID)
+	snapshot, err := s.Query.SnapshotForActor(ctx, options.TaskID, options.AfterEventID, options.ClientID)
 	if err != nil {
 		return ExportReport{}, err
 	}
@@ -88,6 +104,13 @@ func (s *Service) Export(ctx context.Context, options ExportOptions) (ExportRepo
 	default:
 		return ExportReport{}, store.ErrCorrupt
 	}
+	target, err := s.Registry.ReadClient(ctx, options.ClientID)
+	if err != nil {
+		return ExportReport{}, err
+	}
+	if !target.HasCapability("import_export") {
+		return ExportReport{}, fmt.Errorf("handoff target %q lacks import_export capability", target.ID)
+	}
 	binding, err := s.Bindings.ReadBinding(ctx, options.DeviceID, snapshot.Project.ID)
 	if err != nil {
 		return ExportReport{}, err
@@ -95,14 +118,10 @@ func (s *Service) Export(ctx context.Context, options ExportOptions) (ExportRepo
 	if !s.Bindings.BindingAvailable(ctx, options.DeviceID, snapshot.Project.ID) {
 		return ExportReport{}, fmt.Errorf("%w: project %q on device %q", store.ErrBindingUnavailable, snapshot.Project.ID, options.DeviceID)
 	}
-	target, err := s.Registry.ReadClient(ctx, options.ClientID)
-	if err != nil {
-		return ExportReport{}, err
-	}
 	if err := s.validatePortableSnapshot(ctx, snapshot, binding, target); err != nil {
 		return ExportReport{}, err
 	}
-	view, err := s.bindingView(ctx, binding, target, snapshot.Evidence)
+	view, err := s.bindingView(ctx, binding, target, snapshot.Evidence, snapshot.ActionActor)
 	if err != nil {
 		return ExportReport{}, err
 	}
@@ -114,10 +133,14 @@ func (s *Service) Export(ctx context.Context, options ExportOptions) (ExportRepo
 	if err != nil {
 		return ExportReport{}, err
 	}
-	if err := s.Publisher.Publish(options.OutputDir, packageData, options.Force); err != nil {
+	if err := s.Publisher.Publish(options.OutputDir, packageData); err != nil {
 		return ExportReport{}, err
 	}
-	return ExportReport{Adapter: adapter.Name(), TargetClient: target.ID, TaskID: snapshot.Task.ID, ProjectID: snapshot.Project.ID, ThroughEvent: snapshot.ThroughEvent}, nil
+	manifest, err := DecodeManifest(packageData.Manifest)
+	if err != nil {
+		return ExportReport{}, fmt.Errorf("generated handoff manifest is invalid: %w", err)
+	}
+	return ExportReport{Adapter: adapter.Name(), TargetClient: target.ID, TaskID: snapshot.Task.ID, ProjectID: snapshot.Project.ID, ThroughEvent: snapshot.ThroughEvent, PackageID: manifest.PackageID}, nil
 }
 
 func (s *Service) validatePortableSnapshot(ctx context.Context, snapshot store.TaskSnapshot, binding store.ProjectBinding, target protocol.Client) error {
@@ -179,8 +202,8 @@ func portableScanError(source string) error {
 	return fmt.Errorf("handoff safety scan rejected %s", source)
 }
 
-func (s *Service) bindingView(ctx context.Context, binding store.ProjectBinding, target protocol.Client, evidence []protocol.Evidence) (BindingView, error) {
-	view := BindingView{DeviceID: binding.DeviceID, ProjectID: binding.ProjectID, Revision: binding.Revision, TargetClient: target.ID, TargetClientName: target.Name, Evidence: make([]BoundEvidence, 0, len(evidence))}
+func (s *Service) bindingView(ctx context.Context, binding store.ProjectBinding, target protocol.Client, evidence []protocol.Evidence, actionActor string) (BindingView, error) {
+	view := BindingView{DeviceID: binding.DeviceID, ProjectID: binding.ProjectID, Revision: binding.Revision, TargetClient: target.ID, TargetClientName: target.Name, ActionActor: actionActor, Evidence: make([]BoundEvidence, 0, len(evidence))}
 	for _, value := range evidence {
 		bound := BoundEvidence{Evidence: value, Files: make([]store.ResolvedFileRef, 0, len(value.FileRefs))}
 		for _, ref := range value.FileRefs {
@@ -214,10 +237,14 @@ func (adapter ManualCodexAdapter) Export(ctx context.Context, snapshot store.Tas
 	if binding.TargetClient != snapshot.Task.Creator && binding.TargetClient != snapshot.Task.Reviewer {
 		return DeliveryPackage{}, fmt.Errorf("manual-codex target is not the task creator or reviewer")
 	}
-	if binding.TargetClient != snapshot.State.ResponsibleClient {
+	if snapshot.State.Status == protocol.Blocked {
+		if binding.TargetClient != snapshot.Task.Creator || !containsAction(snapshot.AllowedActions, protocol.Assign) {
+			return DeliveryPackage{}, fmt.Errorf("manual-codex BLOCKED handoff requires creator assign permission")
+		}
+	} else if binding.TargetClient != snapshot.State.ResponsibleClient {
 		return DeliveryPackage{}, fmt.Errorf("manual-codex target is not currently responsible")
 	}
-	return buildPackage(ctx, adapter.Name(), snapshot, binding, "审查者或创建者", "审查证据、测试与变更摘要后，使用建议命令回写审查结论；不会控制 Codex Desktop。")
+	return buildPackage(ctx, adapter.Name(), snapshot, binding, "审查者或创建者", "仅生成候选响应 JSON；操作者审核后手工执行建议的 CLI 命令，不会控制 Codex Desktop。")
 }
 
 type ManualCCHahaAdapter struct{}
@@ -225,19 +252,21 @@ type ManualCCHahaAdapter struct{}
 func (ManualCCHahaAdapter) Name() string { return "manual-cc-haha" }
 
 func (adapter ManualCCHahaAdapter) Export(ctx context.Context, snapshot store.TaskSnapshot, binding BindingView) (DeliveryPackage, error) {
-	if binding.TargetClient != snapshot.State.AssignedClient {
-		return DeliveryPackage{}, fmt.Errorf("manual-cc-haha target is not the assigned executor")
+	if binding.TargetClient != snapshot.State.AssignedClient || binding.TargetClient != snapshot.State.ResponsibleClient {
+		return DeliveryPackage{}, fmt.Errorf("manual-cc-haha target is not the assigned responsible executor")
 	}
-	if binding.TargetClient != snapshot.State.ResponsibleClient {
-		return DeliveryPackage{}, fmt.Errorf("manual-cc-haha target is not currently responsible")
+	if len(snapshot.AllowedActions) == 0 {
+		return DeliveryPackage{}, fmt.Errorf("manual-cc-haha target has no permitted action")
 	}
-	return buildPackage(ctx, adapter.Name(), snapshot, binding, "被指派的执行者", "完成工作后通过 CLI 回写消息、Evidence、提交或阻塞；不会读取或控制 CC-HAHA 的内部会话、技能、MCP 或登录态。")
+	return buildPackage(ctx, adapter.Name(), snapshot, binding, "被指派的执行者", "仅生成候选响应 JSON；操作者审核后手工执行建议的 CLI 命令，不会读取或控制 CC-HAHA 的内部会话、技能、MCP 或登录态。")
 }
 
 type Manifest struct {
 	FormatVersion      string             `json:"format_version"`
+	PackageID          string             `json:"package_id"`
 	Adapter            string             `json:"adapter"`
 	TargetClient       string             `json:"target_client"`
+	ActionActor        string             `json:"action_actor"`
 	TaskID             string             `json:"task_id"`
 	ProjectID          string             `json:"project_id"`
 	ProjectRevision    string             `json:"project_revision,omitempty"`
@@ -260,11 +289,128 @@ type ManifestEvidence struct {
 	Files     []store.ResolvedFileRef `json:"files"`
 }
 
+type manifestIdentity struct {
+	FormatVersion      string             `json:"format_version"`
+	Adapter            string             `json:"adapter"`
+	TargetClient       string             `json:"target_client"`
+	ActionActor        string             `json:"action_actor"`
+	TaskID             string             `json:"task_id"`
+	ProjectID          string             `json:"project_id"`
+	ProjectRevision    string             `json:"project_revision,omitempty"`
+	Status             protocol.Status    `json:"status"`
+	Version            int64              `json:"version"`
+	FromEventExclusive int64              `json:"from_event_exclusive"`
+	ThroughEvent       int64              `json:"through_event"`
+	ResponsibleClient  string             `json:"responsible_client"`
+	AllowedActions     []protocol.Action  `json:"allowed_actions"`
+	Events             []protocol.Event   `json:"events"`
+	Evidence           []ManifestEvidence `json:"evidence"`
+}
+
+func (m Manifest) CanonicalPayload() ([]byte, error) {
+	return json.Marshal(manifestIdentity{
+		FormatVersion:      m.FormatVersion,
+		Adapter:            m.Adapter,
+		TargetClient:       m.TargetClient,
+		ActionActor:        m.ActionActor,
+		TaskID:             m.TaskID,
+		ProjectID:          m.ProjectID,
+		ProjectRevision:    m.ProjectRevision,
+		Status:             m.Status,
+		Version:            m.Version,
+		FromEventExclusive: m.FromEventExclusive,
+		ThroughEvent:       m.ThroughEvent,
+		ResponsibleClient:  m.ResponsibleClient,
+		AllowedActions:     m.AllowedActions,
+		Events:             m.Events,
+		Evidence:           m.Evidence,
+	})
+}
+
+func (m Manifest) ComputedPackageID() (string, error) {
+	payload, err := m.CanonicalPayload()
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(payload)
+	return "sha256:" + hex.EncodeToString(digest[:]), nil
+}
+
+func (m Manifest) Validate() error {
+	if m.FormatVersion != "1" || (m.Adapter != "manual-codex" && m.Adapter != "manual-cc-haha") || !protocol.IsValidID(m.TargetClient) || !protocol.IsValidID(m.ActionActor) || !protocol.IsValidID(m.TaskID) || !protocol.IsValidID(m.ProjectID) || !protocol.IsValidID(m.ResponsibleClient) || protocol.ValidatePortableText("project revision", m.ProjectRevision) != nil {
+		return fmt.Errorf("invalid handoff manifest identity")
+	}
+	if m.ActionActor != m.TargetClient || m.Version < 1 || m.FromEventExclusive < 0 || m.ThroughEvent < m.FromEventExclusive || !knownStatus(m.Status) {
+		return fmt.Errorf("invalid handoff manifest state")
+	}
+	if !strings.HasPrefix(m.PackageID, "sha256:") || len(m.PackageID) != len("sha256:")+64 {
+		return fmt.Errorf("invalid package_id")
+	}
+	if _, err := hex.DecodeString(strings.TrimPrefix(m.PackageID, "sha256:")); err != nil {
+		return fmt.Errorf("invalid package_id")
+	}
+	seenActions := map[protocol.Action]bool{}
+	for _, action := range m.AllowedActions {
+		if !knownAction(action) || seenActions[action] {
+			return fmt.Errorf("invalid allowed action")
+		}
+		seenActions[action] = true
+	}
+	nextEventID := m.FromEventExclusive + 1
+	for _, event := range m.Events {
+		if err := event.Validate(m.TaskID); err != nil || event.EventID != nextEventID || event.EventID > m.ThroughEvent {
+			return fmt.Errorf("invalid manifest event")
+		}
+		nextEventID++
+	}
+	if nextEventID != m.ThroughEvent+1 {
+		return fmt.Errorf("manifest event range is incomplete")
+	}
+	seenEvidence := map[string]bool{}
+	for _, evidence := range m.Evidence {
+		if !protocol.IsValidID(evidence.ID) || seenEvidence[evidence.ID] || !isEvidenceKind(evidence.Kind) || !protocol.IsValidID(evidence.CreatedBy) || protocol.ValidatePortableText("evidence summary", evidence.Summary) != nil || evidence.CreatedAt.IsZero() || evidence.CreatedAt.Location() != time.UTC {
+			return fmt.Errorf("invalid manifest evidence")
+		}
+		seenEvidence[evidence.ID] = true
+		for _, file := range evidence.Files {
+			if err := validateResolvedFile(file); err != nil {
+				return err
+			}
+		}
+	}
+	expected, err := m.ComputedPackageID()
+	if err != nil || m.PackageID != expected {
+		return fmt.Errorf("package_id does not match manifest")
+	}
+	return nil
+}
+
+func DecodeManifest(data []byte) (Manifest, error) {
+	var manifest Manifest
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&manifest); err != nil {
+		return Manifest{}, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return Manifest{}, fmt.Errorf("manifest contains multiple JSON values")
+	}
+	if err := manifest.Validate(); err != nil {
+		return Manifest{}, err
+	}
+	return manifest, nil
+}
+
 func buildPackage(_ context.Context, adapter string, snapshot store.TaskSnapshot, binding BindingView, role, outputRequirement string) (DeliveryPackage, error) {
+	if snapshot.ActionActor != binding.TargetClient || binding.ActionActor != binding.TargetClient {
+		return DeliveryPackage{}, fmt.Errorf("handoff action actor does not match target")
+	}
 	manifest := Manifest{
 		FormatVersion:      "1",
 		Adapter:            adapter,
 		TargetClient:       binding.TargetClient,
+		ActionActor:        binding.ActionActor,
 		TaskID:             snapshot.Task.ID,
 		ProjectID:          snapshot.Project.ID,
 		ProjectRevision:    binding.Revision,
@@ -280,104 +426,86 @@ func buildPackage(_ context.Context, adapter string, snapshot store.TaskSnapshot
 	for _, value := range binding.Evidence {
 		manifest.Evidence = append(manifest.Evidence, ManifestEvidence{ID: value.Evidence.ID, Kind: value.Evidence.Kind, Summary: value.Evidence.Summary, CreatedBy: value.Evidence.CreatedBy, CreatedAt: value.Evidence.CreatedAt, Files: append([]store.ResolvedFileRef(nil), value.Files...)})
 	}
+	packageID, err := manifest.ComputedPackageID()
+	if err != nil {
+		return DeliveryPackage{}, err
+	}
+	manifest.PackageID = packageID
+	if err := manifest.Validate(); err != nil {
+		return DeliveryPackage{}, err
+	}
 	manifestData, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return DeliveryPackage{}, err
 	}
-	manifestData = append(manifestData, '\n')
-	return DeliveryPackage{Manifest: manifestData, Handoff: renderHandoff(manifest, snapshot, binding, role, outputRequirement)}, nil
+	candidate := NewCandidateResponse(manifest)
+	candidateData, err := json.MarshalIndent(candidate, "", "  ")
+	if err != nil {
+		return DeliveryPackage{}, err
+	}
+	handoffData, err := renderHandoff(manifest, snapshot, binding, role, outputRequirement)
+	if err != nil {
+		return DeliveryPackage{}, err
+	}
+	return DeliveryPackage{
+		Handoff:                 handoffData,
+		Manifest:                append(manifestData, '\n'),
+		CandidateResponse:       append(candidateData, '\n'),
+		CandidateResponseSchema: CandidateResponseSchema(),
+	}, nil
 }
 
-func renderHandoff(manifest Manifest, snapshot store.TaskSnapshot, binding BindingView, role, outputRequirement string) []byte {
-	var output bytes.Buffer
-	fmt.Fprintln(&output, "# 协作交接包")
-	fmt.Fprintln(&output, "\n## 协议与安全边界")
-	fmt.Fprintln(&output, "本包仅包含可迁移的任务、事件与证据索引。它不包含本机绝对路径、PID、PTY、会话标识、登录态或凭据，也不会控制任何客户端。")
-	fmt.Fprintln(&output, "\n## 目标客户端")
-	fmt.Fprintf(&output, "- 客户端：`%s`（%s）\n- 适配器：`%s`\n- 角色：%s\n", binding.TargetClient, binding.TargetClientName, manifest.Adapter, role)
-	fmt.Fprintln(&output, "\n## 任务目标")
-	fmt.Fprintf(&output, "- 标题：%s\n- 目标：%s\n", snapshot.Task.Title, snapshot.Task.Objective)
-	fmt.Fprintln(&output, "\n## 验收标准")
-	for _, criterion := range snapshot.Task.Acceptance {
-		fmt.Fprintf(&output, "- %s\n", criterion)
-	}
-	fmt.Fprintln(&output, "\n## 当前状态与版本")
-	fmt.Fprintf(&output, "- 状态：`%s`\n- 版本：%d\n- 事件范围：(%d, %d]\n", manifest.Status, manifest.Version, manifest.FromEventExclusive, manifest.ThroughEvent)
-	fmt.Fprintln(&output, "\n## 当前责任方")
-	fmt.Fprintf(&output, "- `%s`\n", manifest.ResponsibleClient)
-	fmt.Fprintln(&output, "\n## 自上次游标后的事件")
-	if len(manifest.Events) == 0 {
-		fmt.Fprintln(&output, "- 无新增事件。")
-	}
-	for _, event := range manifest.Events {
-		fmt.Fprintf(&output, "- #%d `%s`，actor=`%s`，at=`%s`", event.EventID, event.Type, event.Actor, event.At.UTC().Format(time.RFC3339Nano))
-		if event.TargetClient != "" {
-			fmt.Fprintf(&output, "，target=`%s`", event.TargetClient)
-		}
-		if event.Body != "" {
-			fmt.Fprintf(&output, "，body=%q", event.Body)
-		}
-		if len(event.EvidenceRefs) > 0 {
-			fmt.Fprintf(&output, "，evidence=`%s`", strings.Join(event.EvidenceRefs, ","))
-		}
-		fmt.Fprintln(&output)
-	}
-	fmt.Fprintln(&output, "\n## Evidence 索引")
-	if len(manifest.Evidence) == 0 {
-		fmt.Fprintln(&output, "- 无已公告 Evidence。")
-	}
-	for _, evidence := range manifest.Evidence {
-		fmt.Fprintf(&output, "- `%s`（%s）：%s\n", evidence.ID, evidence.Kind, evidence.Summary)
-	}
-	fmt.Fprintln(&output, "\n## 项目相对文件与校验值")
-	for _, evidence := range manifest.Evidence {
-		for _, file := range evidence.Files {
-			if file.Available {
-				fmt.Fprintf(&output, "- `%s`：size=%d，sha256=%s\n", file.RelativeRef, file.Size, file.SHA256)
-			} else {
-				fmt.Fprintf(&output, "- `%s`：unavailable\n", file.RelativeRef)
-			}
+func containsAction(actions []protocol.Action, wanted protocol.Action) bool {
+	for _, action := range actions {
+		if action == wanted {
+			return true
 		}
 	}
-	fmt.Fprintln(&output, "\n## 当前允许动作")
-	if len(manifest.AllowedActions) == 0 {
-		fmt.Fprintln(&output, "- 无。")
-	}
-	for _, action := range manifest.AllowedActions {
-		fmt.Fprintf(&output, "- `%s`\n", action)
-	}
-	fmt.Fprintln(&output, "\n## 建议的 CLI 回写命令")
-	for _, command := range commandsFor(snapshot, binding.TargetClient) {
-		fmt.Fprintf(&output, "- `%s`\n", command)
-	}
-	fmt.Fprintln(&output, "\n## 客户端输出要求")
-	fmt.Fprintln(&output, outputRequirement)
-	return output.Bytes()
+	return false
 }
 
-func commandsFor(snapshot store.TaskSnapshot, clientID string) []string {
-	commands := make([]string, 0, len(snapshot.AllowedActions))
-	for _, action := range snapshot.AllowedActions {
-		switch action {
-		case protocol.Assign:
-			commands = append(commands, fmt.Sprintf("collab task assign --task %s --client <executor-client> --expected-version %d", snapshot.Task.ID, snapshot.State.Version))
-		case protocol.Accept:
-			commands = append(commands, fmt.Sprintf("collab task accept --task %s --actor %s --expected-version %d", snapshot.Task.ID, clientID, snapshot.State.Version))
-		case protocol.Message:
-			commands = append(commands, fmt.Sprintf("collab message add --task %s --actor %s --body <message> --expected-version %d", snapshot.Task.ID, clientID, snapshot.State.Version))
-		case protocol.AddEvidence:
-			commands = append(commands, fmt.Sprintf("collab evidence add --task %s --id <evidence-id> --kind <diff|artifact|test|blocker> --summary <summary> --created-by %s --file-ref <project-relative-path> --expected-version %d", snapshot.Task.ID, clientID, snapshot.State.Version))
-		case protocol.Submit:
-			commands = append(commands, fmt.Sprintf("collab task submit --task %s --actor %s --evidence <diff-or-artifact-id> --evidence <test-id> --expected-version %d", snapshot.Task.ID, clientID, snapshot.State.Version))
-		case protocol.RequestChanges:
-			commands = append(commands, fmt.Sprintf("collab review request-changes --task %s --actor %s --body <feedback> --expected-version %d", snapshot.Task.ID, clientID, snapshot.State.Version))
-		case protocol.Resume:
-			commands = append(commands, fmt.Sprintf("collab task resume --task %s --actor %s --expected-version %d", snapshot.Task.ID, clientID, snapshot.State.Version))
-		case protocol.Approve:
-			commands = append(commands, fmt.Sprintf("collab review approve --task %s --actor %s --expected-version %d", snapshot.Task.ID, clientID, snapshot.State.Version))
-		case protocol.Block:
-			commands = append(commands, fmt.Sprintf("collab task block --task %s --actor %s --evidence <blocker-evidence-id> --expected-version %d", snapshot.Task.ID, clientID, snapshot.State.Version))
-		}
+func knownAction(action protocol.Action) bool {
+	switch action {
+	case protocol.Assign, protocol.Accept, protocol.Submit, protocol.RequestChanges, protocol.Resume, protocol.Approve, protocol.Block, protocol.Message, protocol.AddEvidence:
+		return true
+	default:
+		return false
 	}
-	return commands
+}
+
+func knownStatus(status protocol.Status) bool {
+	switch status {
+	case protocol.Draft, protocol.Assigned, protocol.Working, protocol.Review, protocol.RevisionRequired, protocol.Done, protocol.Blocked:
+		return true
+	default:
+		return false
+	}
+}
+
+func isEvidenceKind(kind protocol.EvidenceKind) bool {
+	switch kind {
+	case protocol.EvidenceDiff, protocol.EvidenceArtifact, protocol.EvidenceTest, protocol.EvidenceBlocker:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateResolvedFile(file store.ResolvedFileRef) error {
+	if err := protocol.ValidatePortableFileRef(file.RelativeRef); err != nil {
+		return err
+	}
+	if !file.Available {
+		if file.Size != 0 || file.SHA256 != "" {
+			return fmt.Errorf("unavailable file has hash data")
+		}
+		return nil
+	}
+	if file.Size < 0 || len(file.SHA256) != 64 {
+		return fmt.Errorf("invalid resolved file")
+	}
+	if _, err := hex.DecodeString(file.SHA256); err != nil || strings.ToLower(file.SHA256) != file.SHA256 {
+		return fmt.Errorf("invalid resolved file hash")
+	}
+	return nil
 }

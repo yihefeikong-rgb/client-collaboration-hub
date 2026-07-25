@@ -43,9 +43,10 @@ EvalSymlinks，最后比较最终真实路径是否仍位于真实 binding 根�
 `event_id > afterEventID`。只有 `HEALTHY` 任务可导出。status 复用该查询并显示
 allowed_actions 与 binding_available（不显示路径）。
 
-交接导出由 `ClientAdapter.Export` 驱动，先扫描 portable 内容，再在临时目录完整生成
-`handoff.md` 与 `manifest.json`，最后原子发布。已有输出目录默认拒绝覆盖，只有显式
-`--force` 可替换。输出稳定排序，便于 diff 和审计。
+交接导出由 `ClientAdapter.Export` 驱动，先扫描 portable 内容，再在临时目录完整生成后安全
+发布。此早期两文件与 `--force` 覆盖设想已由
+`2026-07-25-pilot-ready-handoff-design.md` 取代：包固定四个文件，输出目录必须不存在，绝不
+替换用户目录。输出稳定排序，便于 diff 和审计。
 
 `manual-cc-haha` 面向执行者：ASSIGNED 建议 accept，WORKING 建议 message、evidence add、
 submit、block，REVISION_REQUIRED 建议 resume。`manual-codex` 面向创建者/审查者：REVIEW

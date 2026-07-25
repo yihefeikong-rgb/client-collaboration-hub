@@ -63,6 +63,8 @@ func (a *App) run(ctx context.Context, args []string, jsonOutput bool) (int, err
 		return a.recover(ctx, args[1:], jsonOutput)
 	case matches(args, "handoff", "export"):
 		return a.handoffExport(ctx, args[2:], jsonOutput)
+	case matches(args, "response", "validate"):
+		return a.responseValidate(ctx, args[2:], jsonOutput)
 	default:
 		return ExitValidation, errUsage
 	}
@@ -351,6 +353,7 @@ func (a *App) status(ctx context.Context, args []string, jsonOutput bool) (int, 
 	fs := newFlagSet("status")
 	task := fs.String("task", "", "")
 	device := fs.String("device", "", "")
+	actor := fs.String("actor", "", "")
 	if err := parse(fs, args); err != nil {
 		return ExitValidation, err
 	}
@@ -360,7 +363,13 @@ func (a *App) status(ctx context.Context, args []string, jsonOutput bool) (int, 
 	if *device != "" && !protocol.IsValidID(*device) {
 		return ExitValidation, errUsage
 	}
-	snapshot, err := a.Query.Snapshot(ctx, *task, 0)
+	var snapshot store.TaskSnapshot
+	var err error
+	if *actor == "" {
+		snapshot, err = a.Query.Snapshot(ctx, *task, 0)
+	} else {
+		snapshot, err = a.Query.SnapshotForActor(ctx, *task, 0, *actor)
+	}
 	if err != nil {
 		return exitCode(err), err
 	}
@@ -387,7 +396,6 @@ func (a *App) handoffExport(ctx context.Context, args []string, jsonOutput bool)
 	device := fs.String("device", "", "")
 	afterEvent := fs.Int64("after-event", -1, "")
 	output := fs.String("output", "", "")
-	force := fs.Bool("force", false, "")
 	if err := parse(fs, args); err != nil {
 		return ExitValidation, err
 	}
@@ -398,11 +406,35 @@ func (a *App) handoffExport(ctx context.Context, args []string, jsonOutput bool)
 	if !filepath.IsAbs(outputPath) {
 		outputPath = filepath.Join(a.Root, outputPath)
 	}
-	report, err := a.Handoff.Export(ctx, handoff.ExportOptions{TaskID: *task, ClientID: *client, Adapter: *adapter, DeviceID: *device, AfterEventID: *afterEvent, OutputDir: outputPath, Force: *force})
+	report, err := a.Handoff.Export(ctx, handoff.ExportOptions{TaskID: *task, ClientID: *client, Adapter: *adapter, DeviceID: *device, AfterEventID: *afterEvent, OutputDir: outputPath})
 	if err != nil {
 		return exitCode(err), err
 	}
 	a.writeHandoff(jsonOutput, report)
+	return ExitOK, nil
+}
+
+func (a *App) responseValidate(_ context.Context, args []string, jsonOutput bool) (int, error) {
+	fs := newFlagSet("response validate")
+	packageDir := fs.String("package", "", "")
+	input := fs.String("input", "", "")
+	if err := parse(fs, args); err != nil {
+		return ExitValidation, err
+	}
+	if err := require("package", *packageDir, "input", *input); err != nil {
+		return ExitValidation, errUsage
+	}
+	if !filepath.IsAbs(*packageDir) {
+		*packageDir = filepath.Join(a.Root, *packageDir)
+	}
+	if !filepath.IsAbs(*input) {
+		*input = filepath.Join(a.Root, *input)
+	}
+	result, err := handoff.ValidateResponsePackage(*packageDir, *input)
+	if err != nil {
+		return exitCode(err), err
+	}
+	a.writeResponseValidation(jsonOutput, result)
 	return ExitOK, nil
 }
 

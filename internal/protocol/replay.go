@@ -10,7 +10,11 @@ type EvidenceResolver interface {
 }
 
 func Replay(task Task, events []Event, refs References, resolver EvidenceResolver) (State, error) {
-	if refs == nil || resolver == nil {
+	return ReplayWithPolicy(task, events, refs, resolver, DefaultActionPolicy{})
+}
+
+func ReplayWithPolicy(task Task, events []Event, refs References, resolver EvidenceResolver, policy ActionPolicy) (State, error) {
+	if refs == nil || resolver == nil || policy == nil {
 		return State{}, fmt.Errorf("replay requires references and evidence resolver")
 	}
 	if err := task.Validate(task.ID, refs); err != nil {
@@ -44,13 +48,13 @@ func Replay(task Task, events []Event, refs References, resolver EvidenceResolve
 		var err error
 		switch event.Type {
 		case EventMessageAdded:
-			if !isMessageParticipant(event.Actor, task, state) || len(event.EvidenceRefs) != 0 {
-				return State{}, fmt.Errorf("message actor is not a task participant")
+			if err := policy.Authorize(task, state, event.Actor, Message, refs); err != nil || len(event.EvidenceRefs) != 0 {
+				return State{}, fmt.Errorf("invalid message event")
 			}
 			state = advanceNonBusiness(state, event)
 		case EventEvidenceAdded:
-			if !isMessageParticipant(event.Actor, task, state) {
-				return State{}, fmt.Errorf("evidence actor is not a task participant")
+			if err := policy.Authorize(task, state, event.Actor, AddEvidence, refs); err != nil {
+				return State{}, err
 			}
 			if err := validateEvidenceAdded(event, resolver, announcedEvidence); err != nil {
 				return State{}, err
@@ -58,7 +62,7 @@ func Replay(task Task, events []Event, refs References, resolver EvidenceResolve
 			announcedEvidence[event.EvidenceRefs[0]] = true
 			state = advanceNonBusiness(state, event)
 		default:
-			state, err = replayTransition(state, task, event, refs, resolver, announcedEvidence)
+			state, err = replayTransition(state, task, event, refs, resolver, announcedEvidence, policy)
 			if err != nil {
 				return State{}, err
 			}
@@ -77,12 +81,12 @@ func replayTaskCreated(task Task, event Event) error {
 	return nil
 }
 
-func replayTransition(state State, task Task, event Event, refs References, resolver EvidenceResolver, announcedEvidence map[string]bool) (State, error) {
+func replayTransition(state State, task Task, event Event, refs References, resolver EvidenceResolver, announcedEvidence map[string]bool, policy ActionPolicy) (State, error) {
 	action, err := actionForEvent(event.Type)
 	if err != nil {
 		return State{}, err
 	}
-	if err := validateTransitionCapability(action, event.Actor, task, state, refs); err != nil {
+	if err := policy.Authorize(task, state, event.Actor, action, refs); err != nil {
 		return State{}, err
 	}
 	if event.Type != EventSubmitted && event.Type != EventBlocked && len(event.EvidenceRefs) != 0 {
@@ -129,34 +133,6 @@ func actionForEvent(eventType EventType) (Action, error) {
 	default:
 		return "", fmt.Errorf("event type %q is not a transition", eventType)
 	}
-}
-
-func validateTransitionCapability(action Action, actor string, task Task, state State, refs References) error {
-	capability := "execute"
-	switch action {
-	case Assign:
-		if actor != task.Creator {
-			return fmt.Errorf("assign actor %q is not the task creator", actor)
-		}
-		capability = "create_task"
-	case RequestChanges, Approve:
-		capability = "review"
-	case Block:
-		switch actor {
-		case task.Creator:
-			capability = "create_task"
-		case task.Reviewer:
-			capability = "review"
-		case state.AssignedClient:
-			capability = "execute"
-		default:
-			return fmt.Errorf("block actor %q is not allowed", actor)
-		}
-	}
-	if !refs.ClientHasCapability(actor, capability) {
-		return fmt.Errorf("actor %q lacks %s capability", actor, capability)
-	}
-	return nil
 }
 
 // ValidateAssignmentTarget verifies the durable registry reference required by
@@ -209,10 +185,6 @@ func evidenceKinds(refs []string, taskID string, resolver EvidenceResolver, anno
 		kinds = append(kinds, evidence.Kind)
 	}
 	return kinds, nil
-}
-
-func isMessageParticipant(actor string, task Task, state State) bool {
-	return actor == task.Creator || actor == task.Reviewer || (state.AssignedClient != "" && actor == state.AssignedClient)
 }
 
 func advanceNonBusiness(state State, event Event) State {

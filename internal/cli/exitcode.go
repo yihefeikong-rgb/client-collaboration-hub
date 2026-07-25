@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/handoff"
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/store"
 )
 
@@ -31,6 +32,8 @@ func exitCode(err error) int {
 	case errors.Is(err, store.ErrCorrupt):
 		return ExitCorrupt
 	case errors.Is(err, store.ErrCommitOutcomeUnknown):
+		return ExitUnknown
+	case errors.Is(err, handoff.ErrHandoffOutcomeUnknown):
 		return ExitUnknown
 	case errors.Is(err, store.ErrBindingUnavailable):
 		return ExitBinding

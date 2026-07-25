@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -35,6 +36,7 @@ type statusOutput struct {
 	Health           string            `json:"health"`
 	Reason           string            `json:"reason,omitempty"`
 	State            stateOutput       `json:"state"`
+	ActionActor      string            `json:"action_actor,omitempty"`
 	AllowedActions   []protocol.Action `json:"allowed_actions"`
 	BindingAvailable bool              `json:"binding_available"`
 }
@@ -60,6 +62,15 @@ type handoffOutput struct {
 	TaskID       string `json:"task_id"`
 	ProjectID    string `json:"project_id"`
 	ThroughEvent int64  `json:"through_event"`
+	PackageID    string `json:"package_id"`
+}
+
+type responseValidationOutput struct {
+	PackageID      string `json:"package_id"`
+	TaskID         string `json:"task_id"`
+	ActionActor    string `json:"action_actor"`
+	ProposedAction string `json:"proposed_action"`
+	CommandDraft   string `json:"command_draft"`
 }
 
 func stateResult(state protocol.State) stateOutput {
@@ -102,6 +113,7 @@ func (a *App) writeSnapshotHealth(jsonOutput bool, snapshot store.TaskSnapshot, 
 		Health:           string(snapshot.Health),
 		Reason:           snapshot.Reason,
 		State:            stateResult(snapshot.State),
+		ActionActor:      snapshot.ActionActor,
 		AllowedActions:   snapshot.AllowedActions,
 		BindingAvailable: bindingAvailable,
 	}
@@ -114,7 +126,7 @@ func (a *App) writeSnapshotHealth(jsonOutput bool, snapshot store.TaskSnapshot, 
 		fmt.Fprintf(a.Stdout, "reason: %s\n", result.Reason)
 	}
 	a.writeState(false, snapshot.State)
-	fmt.Fprintf(a.Stdout, "allowed_actions: %s\nbinding_available: %t\n", strings.Join(actionsToStrings(result.AllowedActions), ","), result.BindingAvailable)
+	fmt.Fprintf(a.Stdout, "action_actor: %s\nallowed_actions: %s\nbinding_available: %t\n", result.ActionActor, strings.Join(actionsToStrings(result.AllowedActions), ","), result.BindingAvailable)
 }
 
 func (a *App) writeBinding(jsonOutput bool, projectID, deviceID, revision string, available bool) {
@@ -155,12 +167,21 @@ func (a *App) writeRecoverCorrupt(jsonOutput bool, report store.RecoveryReport) 
 }
 
 func (a *App) writeHandoff(jsonOutput bool, report handoff.ExportReport) {
-	result := handoffOutput{Adapter: report.Adapter, TargetClient: report.TargetClient, TaskID: report.TaskID, ProjectID: report.ProjectID, ThroughEvent: report.ThroughEvent}
+	result := handoffOutput{Adapter: report.Adapter, TargetClient: report.TargetClient, TaskID: report.TaskID, ProjectID: report.ProjectID, ThroughEvent: report.ThroughEvent, PackageID: report.PackageID}
 	if jsonOutput {
 		_ = json.NewEncoder(a.Stdout).Encode(result)
 		return
 	}
-	fmt.Fprintf(a.Stdout, "adapter: %s\ntarget_client: %s\ntask_id: %s\nproject_id: %s\nthrough_event: %d\n", result.Adapter, result.TargetClient, result.TaskID, result.ProjectID, result.ThroughEvent)
+	fmt.Fprintf(a.Stdout, "adapter: %s\ntarget_client: %s\ntask_id: %s\nproject_id: %s\nthrough_event: %d\npackage_id: %s\n", result.Adapter, result.TargetClient, result.TaskID, result.ProjectID, result.ThroughEvent, result.PackageID)
+}
+
+func (a *App) writeResponseValidation(jsonOutput bool, result handoff.ResponseValidation) {
+	output := responseValidationOutput{PackageID: result.Manifest.PackageID, TaskID: result.Manifest.TaskID, ActionActor: result.Manifest.ActionActor, ProposedAction: string(result.Response.ProposedAction), CommandDraft: result.CommandDraft}
+	if jsonOutput {
+		_ = json.NewEncoder(a.Stdout).Encode(output)
+		return
+	}
+	fmt.Fprintf(a.Stdout, "package_id: %s\ntask_id: %s\naction_actor: %s\nproposed_action: %s\ncommand_draft: %s\n", output.PackageID, output.TaskID, output.ActionActor, output.ProposedAction, output.CommandDraft)
 }
 
 func actionsToStrings(actions []protocol.Action) []string {
@@ -177,7 +198,9 @@ func (a *App) writeJSON(value any) {
 
 func (a *App) writeError(jsonOutput bool, err error) {
 	message := err.Error()
-	if exitCode(err) == ExitUnknown {
+	if errors.Is(err, handoff.ErrHandoffOutcomeUnknown) {
+		message += "; inspect the output directory and do not retry the same path"
+	} else if exitCode(err) == ExitUnknown {
 		message += "; run collab status before retrying"
 	}
 	if jsonOutput {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -45,5 +46,41 @@ func TestBindingResolverRejectsSymlinkEscape(t *testing.T) {
 	binding := ProjectBinding{DeviceID: "device-1", ProjectID: "project-1", LocalPath: root, BoundAt: journalTime}
 	if _, err := resolver.Resolve(context.Background(), binding, "outside-link"); err == nil {
 		t.Fatal("symlink escape was accepted")
+	}
+}
+
+func TestBindingResolverRejectsFilesOverConfiguredHashLimit(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "large.txt"), []byte("12345"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolver := NewFileBindingResolver(BindingResolverConfig{MaxHashFileSize: 4})
+	binding := ProjectBinding{DeviceID: "device-1", ProjectID: "project-1", LocalPath: root, BoundAt: journalTime}
+	if _, err := resolver.Resolve(context.Background(), binding, "large.txt"); !errors.Is(err, ErrHashFileTooLarge) {
+		t.Fatalf("large file error = %v", err)
+	}
+}
+
+func TestBindingResolverChecksCancellationAndConcurrentChanges(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "report.txt")
+	if err := os.WriteFile(path, []byte("initial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binding := ProjectBinding{DeviceID: "device-1", ProjectID: "project-1", LocalPath: root, BoundAt: journalTime}
+	ctx, cancel := context.WithCancel(context.Background())
+	resolver := NewFileBindingResolver()
+	resolver.beforeRead = cancel
+	if _, err := resolver.Resolve(ctx, binding, "report.txt"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled hash error = %v", err)
+	}
+	resolver = NewFileBindingResolver()
+	resolver.beforeRead = func() {
+		if err := os.WriteFile(path, []byte("changed content"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := resolver.Resolve(context.Background(), binding, "report.txt"); !errors.Is(err, ErrFileChangedDuringHash) {
+		t.Fatalf("changed file error = %v", err)
 	}
 }

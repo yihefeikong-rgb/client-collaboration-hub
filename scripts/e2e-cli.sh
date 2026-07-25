@@ -32,8 +32,8 @@ PY
 }
 
 run_json init
-run_json client register --id codex --name Codex --capability create_task --capability review
-run_json client register --id cc-haha --name CC-HAHA --capability execute
+run_json client register --id codex --name Codex --capability create_task --capability review --capability import_export
+run_json client register --id cc-haha --name CC-HAHA --capability execute --capability import_export
 run_json project create --id project-1 --name Demo
 run_json project bind --project project-1 --device device-1 --path "$project_path" --revision r1
 run_json task create --id T-0001 --project project-1 --title "Binary workflow" --objective "Verify binary E2E" --acceptance "Tests pass" --creator codex
@@ -43,6 +43,7 @@ run_json evidence add --task T-0001 --id E-diff --kind diff --summary Diff --cre
 run_json evidence add --task T-0001 --id E-test --kind test --summary Tests --created-by cc-haha --file-ref reports/test.txt --expected-version 4
 execution_package="$workspace/handoff-execution"
 run_json handoff export --task T-0001 --client cc-haha --adapter manual-cc-haha --device device-1 --after-event 0 --output "$execution_package"
+run_json response validate --package "$execution_package" --input "$execution_package/candidate-response.json"
 run_json task submit --task T-0001 --actor cc-haha --evidence E-diff --evidence E-test --expected-version 5
 review_package="$workspace/handoff-review"
 run_json handoff export --task T-0001 --client codex --adapter manual-codex --device device-1 --after-event 0 --output "$review_package"
@@ -71,6 +72,9 @@ for package in (execution, review, revision):
     handoff_path = package / "handoff.md"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["format_version"] == "1"
+    assert manifest["package_id"].startswith("sha256:") and len(manifest["package_id"]) == 71
+    assert (package / "candidate-response.json").is_file()
+    assert (package / "candidate-response.schema.json").is_file()
     portable_text = handoff_path.read_text(encoding="utf-8") + manifest_path.read_text(encoding="utf-8")
     assert str(project) not in portable_text
 expected = hashlib.sha256((project / "changes" / "fix.diff").read_bytes()).hexdigest()

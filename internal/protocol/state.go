@@ -117,39 +117,38 @@ func Transition(state State, task Task, request TransitionRequest) (State, error
 	result := state
 	switch request.Action {
 	case Assign:
-		if request.Actor != task.Creator || (state.Status != Draft && state.Status != Blocked) || !IsValidID(request.NextAssignee) {
-			return State{}, fmt.Errorf("assign requires creator, DRAFT or BLOCKED, and valid next assignee")
+		if (state.Status != Draft && state.Status != Blocked) || !IsValidID(request.NextAssignee) {
+			return State{}, fmt.Errorf("assign requires DRAFT or BLOCKED and valid next assignee")
 		}
 		result.Status, result.AssignedClient, result.ResponsibleClient = Assigned, request.NextAssignee, request.NextAssignee
 	case Accept:
-		if state.Status != Assigned || request.Actor != state.ResponsibleClient {
-			return State{}, fmt.Errorf("accept requires assigned responsible client")
+		if state.Status != Assigned {
+			return State{}, fmt.Errorf("accept requires ASSIGNED")
 		}
 		result.Status = Working
 	case Submit:
-		if state.Status != Working || request.Actor != state.ResponsibleClient || !hasSubmissionEvidence(request.EvidenceKinds) {
-			return State{}, fmt.Errorf("submit requires responsible client, diff or artifact, and test evidence")
+		if state.Status != Working || !hasSubmissionEvidence(request.EvidenceKinds) {
+			return State{}, fmt.Errorf("submit requires WORKING, diff or artifact, and test evidence")
 		}
 		result.Status, result.ResponsibleClient = Review, task.Reviewer
 	case RequestChanges:
-		if state.Status != Review || request.Actor != task.Reviewer || strings.TrimSpace(request.Feedback) == "" {
-			return State{}, fmt.Errorf("request_changes requires reviewer and non-empty feedback")
+		if state.Status != Review || strings.TrimSpace(request.Feedback) == "" {
+			return State{}, fmt.Errorf("request_changes requires REVIEW and non-empty feedback")
 		}
 		result.Status, result.ResponsibleClient = RevisionRequired, state.AssignedClient
 	case Resume:
-		if state.Status != RevisionRequired || request.Actor != state.ResponsibleClient {
-			return State{}, fmt.Errorf("resume requires responsible client in REVISION_REQUIRED")
+		if state.Status != RevisionRequired {
+			return State{}, fmt.Errorf("resume requires REVISION_REQUIRED")
 		}
 		result.Status = Working
 	case Approve:
-		if state.Status != Review || request.Actor != task.Reviewer {
-			return State{}, fmt.Errorf("approve requires reviewer in REVIEW")
+		if state.Status != Review {
+			return State{}, fmt.Errorf("approve requires REVIEW")
 		}
 		result.Status = Done
 	case Block:
-		if (state.Status != Assigned && state.Status != Working && state.Status != Review) ||
-			(request.Actor != task.Creator && request.Actor != state.ResponsibleClient) || !hasEvidence(request.EvidenceKinds, EvidenceBlocker) {
-			return State{}, fmt.Errorf("block requires allowed state, creator or responsible client, and blocker evidence")
+		if (state.Status != Assigned && state.Status != Working && state.Status != Review) || !hasEvidence(request.EvidenceKinds, EvidenceBlocker) {
+			return State{}, fmt.Errorf("block requires allowed state and blocker evidence")
 		}
 		result.Status = Blocked
 	default:

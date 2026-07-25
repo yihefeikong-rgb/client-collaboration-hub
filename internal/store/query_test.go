@@ -26,7 +26,7 @@ func TestTaskQueryReturnsConsistentCursorSnapshot(t *testing.T) {
 	if snapshot.Health != Healthy || snapshot.FromEvent != 1 || snapshot.ThroughEvent != 3 || len(snapshot.Events) != 2 || snapshot.Events[0].EventID != 2 || len(snapshot.Evidence) != 1 || snapshot.Evidence[0].ID != evidence.ID {
 		t.Fatalf("Snapshot() = %+v", snapshot)
 	}
-	if !reflect.DeepEqual(snapshot.AllowedActions, []protocol.Action{protocol.Assign}) {
+	if snapshot.ActionActor != "codex" || !reflect.DeepEqual(snapshot.AllowedActions, []protocol.Action{protocol.Assign, protocol.Message, protocol.AddEvidence}) {
 		t.Fatalf("allowed actions = %v", snapshot.AllowedActions)
 	}
 	for _, after := range []int64{-1, 4} {

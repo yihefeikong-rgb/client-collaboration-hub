@@ -26,11 +26,31 @@ type BindingResolver interface {
 	Resolve(context.Context, ProjectBinding, string) (ResolvedFileRef, error)
 }
 
-type FileBindingResolver struct{}
+const DefaultMaxHashFileSize int64 = 64 << 20
 
-func NewFileBindingResolver() *FileBindingResolver { return &FileBindingResolver{} }
+var (
+	ErrHashFileTooLarge      = errors.New("evidence file exceeds hash size limit")
+	ErrFileChangedDuringHash = errors.New("evidence file changed during hashing")
+)
 
-func (*FileBindingResolver) Resolve(ctx context.Context, binding ProjectBinding, ref string) (ResolvedFileRef, error) {
+type BindingResolverConfig struct {
+	MaxHashFileSize int64
+}
+
+type FileBindingResolver struct {
+	MaxHashFileSize int64
+	beforeRead      func()
+}
+
+func NewFileBindingResolver(config ...BindingResolverConfig) *FileBindingResolver {
+	maxHashFileSize := DefaultMaxHashFileSize
+	if len(config) > 0 && config[0].MaxHashFileSize > 0 {
+		maxHashFileSize = config[0].MaxHashFileSize
+	}
+	return &FileBindingResolver{MaxHashFileSize: maxHashFileSize}
+}
+
+func (r *FileBindingResolver) Resolve(ctx context.Context, binding ProjectBinding, ref string) (ResolvedFileRef, error) {
 	result := ResolvedFileRef{RelativeRef: ref}
 	if err := ctx.Err(); err != nil {
 		return result, err
@@ -71,29 +91,72 @@ func (*FileBindingResolver) Resolve(ctx context.Context, binding ProjectBinding,
 	if !pathWithinRoot(root, resolved) {
 		return result, fmt.Errorf("evidence file escapes binding root")
 	}
-	info, err := os.Stat(resolved)
+	file, err := os.Open(resolved)
 	if errors.Is(err, os.ErrNotExist) {
 		return result, nil
 	}
 	if err != nil {
 		return result, err
 	}
-	if !info.Mode().IsRegular() {
-		return result, nil
-	}
-	file, err := os.Open(resolved)
+	defer file.Close()
+	before, err := file.Stat()
 	if err != nil {
 		return result, err
 	}
-	defer file.Close()
+	if !before.Mode().IsRegular() {
+		return result, nil
+	}
+	if before.Size() > r.maxHashFileSize() {
+		return result, fmt.Errorf("%w: %s", ErrHashFileTooLarge, ref)
+	}
+	if r.beforeRead != nil {
+		r.beforeRead()
+	}
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	buffer := make([]byte, 64*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		count, readErr := file.Read(buffer)
+		if count > 0 {
+			if _, err := hash.Write(buffer[:count]); err != nil {
+				return result, err
+			}
+		}
+		if readErr == nil {
+			continue
+		}
+		if readErr == io.EOF {
+			break
+		}
+		return result, readErr
+	}
+	after, err := file.Stat()
+	if err != nil {
 		return result, err
 	}
-	result.Size = info.Size()
+	current, err := os.Stat(resolved)
+	if errors.Is(err, os.ErrNotExist) {
+		return result, ErrFileChangedDuringHash
+	}
+	if err != nil {
+		return result, err
+	}
+	if !os.SameFile(before, after) || !os.SameFile(before, current) || before.Size() != after.Size() || before.Size() != current.Size() || !before.ModTime().Equal(after.ModTime()) || !before.ModTime().Equal(current.ModTime()) {
+		return result, ErrFileChangedDuringHash
+	}
+	result.Size = before.Size()
 	result.SHA256 = hex.EncodeToString(hash.Sum(nil))
 	result.Available = true
 	return result, nil
+}
+
+func (r *FileBindingResolver) maxHashFileSize() int64 {
+	if r == nil || r.MaxHashFileSize <= 0 {
+		return DefaultMaxHashFileSize
+	}
+	return r.MaxHashFileSize
 }
 
 func pathWithinRoot(root, candidate string) bool {

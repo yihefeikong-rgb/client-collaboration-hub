@@ -27,24 +27,33 @@ responsible_client、updated_at。`evidence add` 额外输出 `changed`；同一
 | `collab task submit` / `block` | `--task --actor --evidence`（可重复）`--expected-version` |
 | `collab review request-changes` | `--task --actor --body --expected-version` |
 | `collab review approve` | `--task --actor --expected-version` |
-| `collab status` | `--task [--device]`；显示 allowed_actions 与 binding_available，不显示 local_path |
+| `collab status` | `--task [--device] [--actor]`；显示 action_actor、该 actor 的 allowed_actions 与 binding_available，不显示 local_path |
 | `collab recover` | `--task` |
-| `collab handoff export` | `--task --client --adapter --device --after-event --output [--force]` |
+| `collab handoff export` | `--task --client --adapter --device --after-event --output`；输出目录必须不存在 |
+| `collab response validate` | `--package <handoff-directory> --input <candidate-response.json>`；只读校验并输出命令草案 |
 
 所有正式写入都经过 Journal。`evidence add` 是非业务状态事件；submit/block 只接收已公告
-Evidence ID，由 Journal 读取文件后派生真实 kind。消息仅允许 creator、reviewer 或当前
-assigned client。assign 同时验证 creator 的 create_task capability 与目标 execute capability。
+Evidence ID，由 Journal 读取文件后派生真实 kind。消息与 evidence add 在非 DONE 状态仅允许
+creator、reviewer 或当前 assigned client。所有动作由同一 Action Policy 授权；assign 同时验证
+creator 的 create_task capability 与目标 execute capability。DONE 拒绝所有写入。
 
 `init` 创建 `projects/`、`clients/`、`tasks/`、`bindings/`、`.runtime/`，并且不覆盖已有
 `.gitignore` 内容；只追加 `collaboration/.runtime/`、`collaboration/bindings/` 和 `collab.exe`。
 
 handoff adapter 只支持 `manual-codex` 与 `manual-cc-haha`，并且只生成文件交接包；不会导入、
-启动、控制或读取 Codex、CC-HAHA、AO 或任何客户端的内部状态。
+启动、控制或读取 Codex、CC-HAHA、AO 或任何客户端的内部状态。目标客户端除角色与当前动作
+权限外，必须具备 `import_export` capability。
 
-handoff export 仅允许 HEALTHY 任务。它要求所选设备已绑定任务项目，输出目录默认不可覆盖。
-manifest 与 handoff.md 是 portable 内容，不能包含 Binding 的绝对 local_path。`recover` 发现
-CORRUPT 时会在文本或 JSON 中输出 health、reason 与本地诊断 backup_path；诊断备份失败时
-额外显示其失败状态，不能掩盖已确认的 CORRUPT。
+handoff export 仅允许 HEALTHY 任务。它要求所选设备已绑定任务项目，输出目录必须不存在，
+并且拒绝仓库根、`collaboration/`、其下路径、已有文件与已有符号链接；没有 `--force`。
+manifest 与 handoff.md 是 portable 内容，不能包含 Binding 的绝对 local_path。成功输出的包固定
+有四个文件，并在结果中显示 `package_id`。发布后验证失败返回未知结果，必须检查该目录，不能
+重试相同路径。
+
+`response validate` 不调用 Journal：它只读取已发布包和候选响应，验证 package_id、任务、
+version/cursor、actor、allowed action、schema 与 portable Evidence，成功后输出 `command_draft`。
+候选 JSON 永远不会被自动转换成 Event 或 CLI 写入。`recover` 发现 CORRUPT 时会在文本或 JSON
+中输出 health、reason 与本地诊断 backup_path；诊断备份失败时额外显示其失败状态，不能掩盖已确认的 CORRUPT。
 
 ## 退出码
 
@@ -57,5 +66,5 @@ CORRUPT 时会在文本或 JSON 中输出 health、reason 与本地诊断 backup
 | 5 | 本地 binding 不可用 |
 | 6 | `RECOVERABLE_TAIL`，需要 `collab recover` |
 | 7 | `CORRUPT` |
-| 8 | `ErrCommitOutcomeUnknown`；先运行 `collab status`，不得盲重试 |
+| 8 | `ErrCommitOutcomeUnknown` 或 `ErrHandoffOutcomeUnknown`；前者先运行 `collab status`，后者检查已发布目录且不得重试同一路径 |
 | 9 | 资源不存在 |

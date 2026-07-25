@@ -15,6 +15,7 @@ type TaskSnapshot struct {
 	Reason         string
 	Events         []protocol.Event
 	Evidence       []protocol.Evidence
+	ActionActor    string
 	AllowedActions []protocol.Action
 	FromEvent      int64
 	ThroughEvent   int64
@@ -22,6 +23,7 @@ type TaskSnapshot struct {
 
 type TaskQuery interface {
 	Snapshot(context.Context, string, int64) (TaskSnapshot, error)
+	SnapshotForActor(context.Context, string, int64, string) (TaskSnapshot, error)
 }
 
 type FileTaskQuery struct {
@@ -34,6 +36,17 @@ func NewFileTaskQuery(journal *FileTaskJournal, registry RegistryStore) *FileTas
 }
 
 func (q *FileTaskQuery) Snapshot(ctx context.Context, taskID string, afterEventID int64) (TaskSnapshot, error) {
+	return q.snapshot(ctx, taskID, afterEventID, "")
+}
+
+func (q *FileTaskQuery) SnapshotForActor(ctx context.Context, taskID string, afterEventID int64, actor string) (TaskSnapshot, error) {
+	if !protocol.IsValidID(actor) {
+		return TaskSnapshot{}, fmt.Errorf("invalid action actor %q", actor)
+	}
+	return q.snapshot(ctx, taskID, afterEventID, actor)
+}
+
+func (q *FileTaskQuery) snapshot(ctx context.Context, taskID string, afterEventID int64, actor string) (TaskSnapshot, error) {
 	if q.Journal == nil || q.Registry == nil {
 		return TaskSnapshot{}, fmt.Errorf("task query requires journal and registry")
 	}
@@ -78,7 +91,11 @@ func (q *FileTaskQuery) Snapshot(ctx context.Context, taskID string, afterEventI
 	if err != nil {
 		return TaskSnapshot{}, err
 	}
-	snapshot.AllowedActions = allowedActions(task, snapshot.State)
+	if actor == "" {
+		actor = defaultActionActor(task, snapshot.State)
+	}
+	snapshot.ActionActor = actor
+	snapshot.AllowedActions = q.policy().AllowedActions(task, snapshot.State, actor, q.Registry)
 	return snapshot, nil
 }
 
@@ -97,27 +114,16 @@ func (q *FileTaskQuery) announcedEvidence(ctx context.Context, taskID string, ev
 	return evidence, nil
 }
 
-func allowedActions(task protocol.Task, state protocol.State) []protocol.Action {
-	switch state.Status {
-	case protocol.Draft:
-		if state.ResponsibleClient != task.Creator {
-			return nil
-		}
-		return []protocol.Action{protocol.Assign}
-	case protocol.Blocked:
-		if state.ResponsibleClient != task.Creator {
-			return nil
-		}
-		return []protocol.Action{protocol.Assign}
-	case protocol.Assigned:
-		return []protocol.Action{protocol.Accept}
-	case protocol.Working:
-		return []protocol.Action{protocol.Message, protocol.AddEvidence, protocol.Submit, protocol.Block}
-	case protocol.Review:
-		return []protocol.Action{protocol.Message, protocol.RequestChanges, protocol.Approve, protocol.Block}
-	case protocol.RevisionRequired:
-		return []protocol.Action{protocol.Resume}
-	default:
-		return nil
+func (q *FileTaskQuery) policy() protocol.ActionPolicy {
+	if q.Journal != nil && q.Journal.Policy != nil {
+		return q.Journal.Policy
 	}
+	return protocol.DefaultActionPolicy{}
+}
+
+func defaultActionActor(task protocol.Task, state protocol.State) string {
+	if state.Status == protocol.Blocked {
+		return task.Creator
+	}
+	return state.ResponsibleClient
 }

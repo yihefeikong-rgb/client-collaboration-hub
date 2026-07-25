@@ -81,6 +81,42 @@ func TestAppendMessagePreservesBusinessState(t *testing.T) {
 	}
 }
 
+func TestJournalAndQueryShareActionPolicy(t *testing.T) {
+	journal, root := newJournal(t)
+	createTask(t, journal, "T-0001")
+	query := NewFileTaskQuery(journal, NewFileRegistryStore(root, FlockLocker{}))
+	snapshot, err := query.SnapshotForActor(context.Background(), "T-0001", 0, "codex")
+	if err != nil || !containsStoreAction(snapshot.AllowedActions, protocol.Assign) {
+		t.Fatalf("creator snapshot = %+v, %v", snapshot, err)
+	}
+	if _, err := journal.CommitTransition(context.Background(), "T-0001", 1, protocol.TransitionIntent{Action: protocol.Assign, Actor: "codex", NextAssignee: "cc-haha", At: journalTime}, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = query.SnapshotForActor(context.Background(), "T-0001", 0, "cc-haha")
+	if err != nil || !containsStoreAction(snapshot.AllowedActions, protocol.Accept) {
+		t.Fatalf("executor snapshot = %+v, %v", snapshot, err)
+	}
+	if _, err := journal.CommitTransition(context.Background(), "T-0001", 2, protocol.TransitionIntent{Action: protocol.Accept, Actor: "cc-haha", At: journalTime}, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = query.SnapshotForActor(context.Background(), "T-0001", 0, "codex")
+	if err != nil || containsStoreAction(snapshot.AllowedActions, protocol.Submit) {
+		t.Fatalf("creator working snapshot = %+v, %v", snapshot, err)
+	}
+	if _, err := journal.CommitTransition(context.Background(), "T-0001", 3, protocol.TransitionIntent{Action: protocol.Submit, Actor: "codex", At: journalTime}, nil); err == nil {
+		t.Fatal("Journal accepted an action absent from actor allowed_actions")
+	}
+}
+
+func containsStoreAction(actions []protocol.Action, wanted protocol.Action) bool {
+	for _, action := range actions {
+		if action == wanted {
+			return true
+		}
+	}
+	return false
+}
+
 func TestAddEvidenceDerivesSubmissionKindsAndPreservesBusinessState(t *testing.T) {
 	journal, _ := newJournal(t)
 	createTask(t, journal, "T-0001")

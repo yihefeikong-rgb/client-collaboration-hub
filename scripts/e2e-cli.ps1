@@ -47,8 +47,8 @@ try {
     Push-Location $workspace
     try {
         Invoke-CollabJson @("init") | Out-Null
-        Invoke-CollabJson @("client", "register", "--id", "codex", "--name", "Codex", "--capability", "create_task", "--capability", "review") | Out-Null
-        Invoke-CollabJson @("client", "register", "--id", "cc-haha", "--name", "CC-HAHA", "--capability", "execute") | Out-Null
+        Invoke-CollabJson @("client", "register", "--id", "codex", "--name", "Codex", "--capability", "create_task", "--capability", "review", "--capability", "import_export") | Out-Null
+        Invoke-CollabJson @("client", "register", "--id", "cc-haha", "--name", "CC-HAHA", "--capability", "execute", "--capability", "import_export") | Out-Null
         Invoke-CollabJson @("project", "create", "--id", "project-1", "--name", "Demo") | Out-Null
         Invoke-CollabJson @("project", "bind", "--project", "project-1", "--device", "device-1", "--path", $projectPath, "--revision", "r1") | Out-Null
         Invoke-CollabJson @("task", "create", "--id", "T-0001", "--project", "project-1", "--title", "Binary workflow", "--objective", "Verify binary E2E", "--acceptance", "Tests pass", "--creator", "codex") | Out-Null
@@ -58,6 +58,10 @@ try {
         Invoke-CollabJson @("evidence", "add", "--task", "T-0001", "--id", "E-test", "--kind", "test", "--summary", "Tests", "--created-by", "cc-haha", "--file-ref", "reports/test.txt", "--expected-version", "4") | Out-Null
         $executionPackage = Join-Path $workspace "handoff-execution"
         Invoke-CollabJson @("handoff", "export", "--task", "T-0001", "--client", "cc-haha", "--adapter", "manual-cc-haha", "--device", "device-1", "--after-event", "0", "--output", $executionPackage) | Out-Null
+        $response = Invoke-CollabJson @("response", "validate", "--package", $executionPackage, "--input", (Join-Path $executionPackage "candidate-response.json"))
+        if (-not $response.Value.command_draft.Contains("collab task submit")) {
+            throw "candidate response did not produce a submit command draft"
+        }
         Invoke-CollabJson @("task", "submit", "--task", "T-0001", "--actor", "cc-haha", "--evidence", "E-diff", "--evidence", "E-test", "--expected-version", "5") | Out-Null
         $reviewPackage = Join-Path $workspace "handoff-review"
         Invoke-CollabJson @("handoff", "export", "--task", "T-0001", "--client", "codex", "--adapter", "manual-codex", "--device", "device-1", "--after-event", "0", "--output", $reviewPackage) | Out-Null
@@ -85,6 +89,9 @@ try {
         }
         if ($manifest.format_version -ne "1") {
             throw "unexpected manifest format in $packagePath"
+        }
+        if ($manifest.package_id -notmatch '^sha256:[0-9a-f]{64}$' -or -not (Test-Path -LiteralPath (Join-Path $packagePath "candidate-response.json")) -or -not (Test-Path -LiteralPath (Join-Path $packagePath "candidate-response.schema.json"))) {
+            throw "incomplete portable package: $packagePath"
         }
     }
     $expectedHash = (Get-FileHash -LiteralPath (Join-Path $projectPath "changes\fix.diff") -Algorithm SHA256).Hash.ToLowerInvariant()

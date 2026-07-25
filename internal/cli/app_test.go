@@ -30,8 +30,8 @@ func TestCLIWorkflowFromInitToDone(t *testing.T) {
 		}
 	}
 	run("init")
-	run("client", "register", "--id", "codex", "--name", "Codex", "--capability", "create_task", "--capability", "review")
-	run("client", "register", "--id", "cc-haha", "--name", "CC-HAHA", "--capability", "execute")
+	run("client", "register", "--id", "codex", "--name", "Codex", "--capability", "create_task", "--capability", "review", "--capability", "import_export")
+	run("client", "register", "--id", "cc-haha", "--name", "CC-HAHA", "--capability", "execute", "--capability", "import_export")
 	run("project", "create", "--id", "project-1", "--name", "Demo")
 	run("task", "create", "--id", "T-0001", "--project", "project-1", "--title", "Demo task", "--objective", "Verify workflow", "--acceptance", "Tests pass", "--creator", "codex")
 	run("task", "assign", "--task", "T-0001", "--client", "cc-haha", "--expected-version", "1")
@@ -226,8 +226,8 @@ func TestCLIBindingStatusAndManualHandoff(t *testing.T) {
 		}
 	}
 	run("init")
-	run("client", "register", "--id", "codex", "--name", "Codex", "--capability", "create_task", "--capability", "review")
-	run("client", "register", "--id", "cc-haha", "--name", "CC-HAHA", "--capability", "execute")
+	run("client", "register", "--id", "codex", "--name", "Codex", "--capability", "create_task", "--capability", "review", "--capability", "import_export")
+	run("client", "register", "--id", "cc-haha", "--name", "CC-HAHA", "--capability", "execute", "--capability", "import_export")
 	run("project", "create", "--id", "project-1", "--name", "Demo")
 	run("project", "bind", "--project", "project-1", "--device", "device-1", "--path", projectPath, "--revision", "r1")
 	run("project", "binding-status", "--project", "project-1", "--device", "device-1")
@@ -244,6 +244,10 @@ func TestCLIBindingStatusAndManualHandoff(t *testing.T) {
 	if err != nil || strings.Contains(string(ccHandoff), projectPath) {
 		t.Fatalf("manual-cc-haha package = %s, %v", ccHandoff, err)
 	}
+	run("response", "validate", "--package", "handoff-cc", "--input", filepath.Join(root, "handoff-cc", "candidate-response.json"))
+	if !strings.Contains(stdout.String(), "command_draft") {
+		t.Fatalf("response validation output = %s", stdout.String())
+	}
 	run("task", "submit", "--task", "T-0005", "--actor", "cc-haha", "--evidence", "E-diff", "--evidence", "E-test", "--expected-version", "5")
 	run("handoff", "export", "--task", "T-0005", "--client", "codex", "--adapter", "manual-codex", "--device", "device-1", "--after-event", "5", "--output", "handoff-codex")
 	if _, err := os.Stat(filepath.Join(root, "handoff-codex", "manifest.json")); err != nil {
@@ -256,6 +260,18 @@ func TestCLIBindingStatusAndManualHandoff(t *testing.T) {
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil || !status.BindingAvailable || len(status.AllowedActions) == 0 {
 		t.Fatalf("status=%s err=%v", stdout.String(), err)
+	}
+	for _, output := range []string{".", "..", "collaboration", "handoff-codex"} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := app.Run([]string{"handoff", "export", "--task", "T-0005", "--client", "codex", "--adapter", "manual-codex", "--device", "device-1", "--after-event", "0", "--output", output}); code != ExitValidation {
+			t.Fatalf("unsafe output %q code=%d stderr=%s", output, code, stderr.String())
+		}
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := app.Run([]string{"handoff", "export", "--task", "T-0005", "--client", "codex", "--adapter", "manual-codex", "--device", "device-1", "--after-event", "0", "--output", "future", "--force"}); code != ExitValidation {
+		t.Fatalf("removed force flag code=%d stderr=%s", code, stderr.String())
 	}
 }
 
