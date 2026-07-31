@@ -57,9 +57,11 @@ type EvidenceAddResult struct {
 type TaskJournal interface {
 	Inspect(context.Context, string) (HealthReport, error)
 	CreateTask(context.Context, protocol.Task) error
+	CreateTaskFromAgent(context.Context, protocol.Task, string, string, string, time.Time) error
 	CommitTransition(context.Context, string, int64, protocol.TransitionIntent, []string) (protocol.State, error)
 	AppendMessage(context.Context, string, int64, string, string, time.Time) (protocol.State, error)
 	AddEvidence(context.Context, string, int64, protocol.Evidence) (EvidenceAddResult, error)
+	ApplyAgentSubmission(context.Context, string, int64, AgentSubmission) (AgentSubmissionResult, error)
 	RecoverTail(context.Context, string) (RecoveryReport, error)
 }
 
@@ -119,11 +121,13 @@ type FileTaskJournal struct {
 	Replacer   AtomicReplacer
 	Now        func() time.Time
 	References protocol.References
+	Projects   ProjectPolicyReader
 	Evidence   EvidenceStore
 	Policy     protocol.ActionPolicy
 }
 
 func NewFileTaskJournal(root string, locker Locker, references protocol.References, evidence EvidenceStore) *FileTaskJournal {
+	projects, _ := references.(ProjectPolicyReader)
 	return &FileTaskJournal{
 		Root:       root,
 		Locks:      ScopedLocks{Root: root, Locker: locker},
@@ -131,6 +135,7 @@ func NewFileTaskJournal(root string, locker Locker, references protocol.Referenc
 		Replacer:   osReplacer{},
 		Now:        time.Now,
 		References: references,
+		Projects:   projects,
 		Evidence:   evidence,
 		Policy:     protocol.DefaultActionPolicy{},
 	}
@@ -146,6 +151,10 @@ func (j *FileTaskJournal) Inspect(ctx context.Context, taskID string) (HealthRep
 }
 
 func (j *FileTaskJournal) CreateTask(ctx context.Context, task protocol.Task) error {
+	return j.createTask(ctx, task, protocol.Event{Origin: protocol.EventOriginHuman, PolicyDecision: protocol.PolicyDecisionHumanOperator})
+}
+
+func (j *FileTaskJournal) createTask(ctx context.Context, task protocol.Task, provenance protocol.Event) error {
 	if j.References == nil {
 		return fmt.Errorf("task journal references are required")
 	}
@@ -172,8 +181,11 @@ func (j *FileTaskJournal) CreateTask(ctx context.Context, task protocol.Task) er
 		return err
 	}
 	defer os.RemoveAll(tempDir)
-	event := protocol.Event{EventID: 1, TaskID: task.ID, Type: protocol.EventTaskCreated, Actor: task.Creator, At: task.CreatedAt, Body: task.Title, ExpectedVersion: 0}
+	event := protocol.Event{EventID: 1, TaskID: task.ID, Type: protocol.EventTaskCreated, Actor: task.Creator, At: task.CreatedAt, Body: task.Title, ExpectedVersion: 0, Origin: provenance.Origin, SubmissionID: provenance.SubmissionID, PolicyDecision: provenance.PolicyDecision}
 	state := protocol.State{TaskID: task.ID, Status: protocol.Draft, Version: 1, LastEventID: 1, ResponsibleClient: task.Creator, UpdatedAt: task.CreatedAt}
+	if err := event.Validate(task.ID); err != nil {
+		return err
+	}
 	if err := j.writeTaskFiles(tempDir, task, state, event); err != nil {
 		return err
 	}
@@ -311,7 +323,7 @@ func (j *FileTaskJournal) AppendMessage(ctx context.Context, taskID string, expe
 	next.Version++
 	next.LastEventID++
 	next.UpdatedAt = at
-	event := protocol.Event{EventID: next.LastEventID, TaskID: taskID, Type: protocol.EventMessageAdded, Actor: actor, At: at, Body: body, ExpectedVersion: report.State.Version}
+	event := protocol.Event{EventID: next.LastEventID, TaskID: taskID, Type: protocol.EventMessageAdded, Actor: actor, At: at, Body: body, ExpectedVersion: report.State.Version, Origin: protocol.EventOriginHuman, PolicyDecision: protocol.PolicyDecisionHumanOperator}
 	if err := j.commitRecord(taskID, report.State, event, next); err != nil {
 		return protocol.State{}, err
 	}
@@ -376,7 +388,7 @@ func (j *FileTaskJournal) AddEvidence(ctx context.Context, taskID string, expect
 	next.Version++
 	next.LastEventID++
 	next.UpdatedAt = evidence.CreatedAt
-	event := protocol.Event{EventID: next.LastEventID, TaskID: taskID, Type: protocol.EventEvidenceAdded, Actor: evidence.CreatedBy, At: evidence.CreatedAt, Body: evidence.Summary, EvidenceRefs: []string{evidence.ID}, ExpectedVersion: report.State.Version}
+	event := protocol.Event{EventID: next.LastEventID, TaskID: taskID, Type: protocol.EventEvidenceAdded, Actor: evidence.CreatedBy, At: evidence.CreatedAt, Body: evidence.Summary, EvidenceRefs: []string{evidence.ID}, ExpectedVersion: report.State.Version, Origin: protocol.EventOriginHuman, PolicyDecision: protocol.PolicyDecisionHumanOperator}
 	if err := j.commitRecord(taskID, report.State, event, next); err != nil {
 		return EvidenceAddResult{}, err
 	}
@@ -403,7 +415,7 @@ func eventForTransition(taskID string, state protocol.State, intent protocol.Tra
 	default:
 		return protocol.Event{}, fmt.Errorf("unknown transition action %q", intent.Action)
 	}
-	event := protocol.Event{EventID: state.LastEventID + 1, TaskID: taskID, Type: eventType, Actor: intent.Actor, At: intent.At, EvidenceRefs: evidenceRefs, ExpectedVersion: state.Version}
+	event := protocol.Event{EventID: state.LastEventID + 1, TaskID: taskID, Type: eventType, Actor: intent.Actor, At: intent.At, EvidenceRefs: evidenceRefs, ExpectedVersion: state.Version, Origin: intent.Origin, SubmissionID: intent.SubmissionID, PolicyDecision: intent.PolicyDecision}
 	if intent.Action == protocol.Assign {
 		event.TargetClient = intent.NextAssignee
 	}

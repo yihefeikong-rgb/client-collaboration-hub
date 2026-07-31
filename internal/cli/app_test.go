@@ -60,6 +60,44 @@ func TestCLIWorkflowFromInitToDone(t *testing.T) {
 	}
 }
 
+func TestCLIAgentTaskCreateRecordsReceipt(t *testing.T) {
+	root := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := NewApp(root, &stdout, &stderr, func() time.Time { return time.Date(2026, 7, 28, 8, 0, 0, 0, time.UTC) })
+	run := func(args ...string) {
+		t.Helper()
+		stdout.Reset()
+		stderr.Reset()
+		if code := app.Run(append([]string{"--json"}, args...)); code != ExitOK {
+			t.Fatalf("%v: code=%d stderr=%s", args, code, stderr.String())
+		}
+	}
+	run("init")
+	run("client", "register", "--id", "codex", "--name", "Codex", "--capability", "create_task", "--capability", "review")
+	run("project", "create", "--id", "project-1", "--name", "Demo")
+	input := filepath.Join(root, "task-candidate.json")
+	data := []byte(`{"format_version":"1","submission_id":"sub-create-1","source_client_id":"codex","id":"T-AGENT-1","project_id":"project-1","title":"Agent task","objective":"Verify intake","acceptance":["Pass"],"creator":"codex","reviewer":"codex"}`)
+	if err := os.WriteFile(input, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("agent", "task-create", "--input", input)
+	var output struct {
+		ReceiptID string `json:"receipt_id"`
+		Status    string `json:"status"`
+		State     struct {
+			TaskID  string `json:"task_id"`
+			Status  string `json:"status"`
+			Version int64  `json:"version"`
+		} `json:"state"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.ReceiptID == "" || output.Status != "ACCEPTED" || output.State.TaskID != "T-AGENT-1" || output.State.Status != "DRAFT" || output.State.Version != 1 {
+		t.Fatalf("agent task output=%s", stdout.String())
+	}
+}
+
 func TestInitIsIdempotentAndPreservesGitignore(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("custom-entry\n"), 0o600); err != nil {
@@ -239,6 +277,15 @@ func TestCLIBindingStatusAndManualHandoff(t *testing.T) {
 	run("task", "accept", "--task", "T-0005", "--actor", "cc-haha", "--expected-version", "2")
 	run("evidence", "add", "--task", "T-0005", "--id", "E-diff", "--kind", "diff", "--summary", "Diff", "--created-by", "cc-haha", "--file-ref", "changes/fix.diff", "--expected-version", "3")
 	run("evidence", "add", "--task", "T-0005", "--id", "E-test", "--kind", "test", "--summary", "Tests", "--created-by", "cc-haha", "--file-ref", "reports/test.txt", "--expected-version", "4")
+	run("handoff", "next", "--task", "T-0005")
+	var automatic struct {
+		TargetClient       string `json:"target_client"`
+		FromEventExclusive int64  `json:"from_event_exclusive"`
+		OutputDir          string `json:"output_dir"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &automatic); err != nil || automatic.TargetClient != "cc-haha" || automatic.FromEventExclusive != 0 || !strings.HasPrefix(automatic.OutputDir, "collaboration/.runtime/handoffs/T-0005/cc-haha/") {
+		t.Fatalf("automatic handoff=%s err=%v", stdout.String(), err)
+	}
 	run("handoff", "export", "--task", "T-0005", "--client", "cc-haha", "--adapter", "manual-cc-haha", "--device", "device-1", "--after-event", "0", "--output", "handoff-cc")
 	ccHandoff, err := os.ReadFile(filepath.Join(root, "handoff-cc", "handoff.md"))
 	if err != nil || strings.Contains(string(ccHandoff), projectPath) {

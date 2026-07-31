@@ -55,6 +55,28 @@ func TestBindingStoreCreatesAndUpdatesDeviceLocalBinding(t *testing.T) {
 	}
 }
 
+func TestBindingStoreListsProjectBindingsInDeviceOrder(t *testing.T) {
+	root := t.TempDir()
+	registry := NewFileRegistryStore(root, FlockLocker{})
+	if err := registry.CreateProject(context.Background(), protocol.Project{ID: "project-1", Name: "Demo", CreatedAt: journalTime}); err != nil {
+		t.Fatal(err)
+	}
+	store := NewFileBindingStore(root, FlockLocker{}, registry)
+	for _, deviceID := range []string{"device-2", "device-1"} {
+		path := filepath.Join(root, deviceID)
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.BindProject(context.Background(), ProjectBinding{DeviceID: deviceID, ProjectID: "project-1", LocalPath: path, BoundAt: journalTime}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bindings, err := store.ListBindings(context.Background(), "project-1")
+	if err != nil || len(bindings) != 2 || bindings[0].DeviceID != "device-1" || bindings[1].DeviceID != "device-2" {
+		t.Fatalf("ListBindings() = %#v, %v", bindings, err)
+	}
+}
+
 func TestBindingStoreRejectsUnknownProjectAndUnavailablePath(t *testing.T) {
 	root := t.TempDir()
 	registry := NewFileRegistryStore(root, FlockLocker{})

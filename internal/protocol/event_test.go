@@ -39,3 +39,24 @@ func TestEventRejectsUnsafePortableBody(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentEventRequiresSubmissionAndPolicyDecision(t *testing.T) {
+	event := Event{
+		EventID:         1,
+		TaskID:          "T-0001",
+		Type:            EventMessageAdded,
+		Actor:           "cc-haha",
+		At:              time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC),
+		Body:            "已开始处理。",
+		ExpectedVersion: 1,
+		Origin:          EventOriginAgent,
+	}
+	if err := event.Validate(event.TaskID); err == nil {
+		t.Fatal("agent event without provenance accepted")
+	}
+	event.SubmissionID = "sub-001"
+	event.PolicyDecision = "agent_auto_human_final"
+	if err := event.Validate(event.TaskID); err != nil {
+		t.Fatal(err)
+	}
+}

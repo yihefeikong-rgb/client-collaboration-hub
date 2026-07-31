@@ -43,12 +43,12 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $projectPath "reports") -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $projectPath "changes\fix.diff") -Value "diff" -NoNewline
     Set-Content -LiteralPath (Join-Path $projectPath "reports\test.txt") -Value "tests" -NoNewline
+    $previousCollabHome = $env:COLLAB_HOME
+    $env:COLLAB_HOME = $workspace
 
     Push-Location $workspace
     try {
         Invoke-CollabJson @("init") | Out-Null
-        Invoke-CollabJson @("client", "register", "--id", "codex", "--name", "Codex", "--capability", "create_task", "--capability", "review", "--capability", "import_export") | Out-Null
-        Invoke-CollabJson @("client", "register", "--id", "cc-haha", "--name", "CC-HAHA", "--capability", "execute", "--capability", "import_export") | Out-Null
         Invoke-CollabJson @("project", "create", "--id", "project-1", "--name", "Demo") | Out-Null
         Invoke-CollabJson @("project", "bind", "--project", "project-1", "--device", "device-1", "--path", $projectPath, "--revision", "r1") | Out-Null
         Invoke-CollabJson @("task", "create", "--id", "T-0001", "--project", "project-1", "--title", "Binary workflow", "--objective", "Verify binary E2E", "--acceptance", "Tests pass", "--creator", "codex") | Out-Null
@@ -105,6 +105,7 @@ try {
         $status = Invoke-CollabJson @("status", "--task", "T-0001", "--device", "device-1")
     } finally {
         Pop-Location
+        $env:COLLAB_HOME = $previousCollabHome
     }
 
     if ($status.Value.health -ne "HEALTHY" -or $status.Value.state.status -ne "DONE" -or -not $status.Value.binding_available) {

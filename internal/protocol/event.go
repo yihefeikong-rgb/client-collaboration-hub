@@ -11,6 +11,20 @@ import (
 
 type EventType string
 
+type EventOrigin string
+
+const (
+	EventOriginAgent EventOrigin = "agent"
+	EventOriginHuman EventOrigin = "human"
+)
+
+const (
+	PolicyDecisionAgentAutoHumanFinal = "agent_auto_human_final"
+	PolicyDecisionAgentAutoAgentFinal = "agent_auto_agent_final"
+	PolicyDecisionHumanFinal          = "human_final"
+	PolicyDecisionHumanOperator       = "human_operator"
+)
+
 const (
 	EventTaskCreated      EventType = "task_created"
 	EventAssigned         EventType = "assigned"
@@ -25,15 +39,18 @@ const (
 )
 
 type Event struct {
-	EventID         int64     `json:"event_id"`
-	TaskID          string    `json:"task_id"`
-	Type            EventType `json:"type"`
-	Actor           string    `json:"actor"`
-	At              time.Time `json:"at"`
-	Body            string    `json:"body"`
-	EvidenceRefs    []string  `json:"evidence_refs"`
-	ExpectedVersion int64     `json:"expected_version"`
-	TargetClient    string    `json:"target_client,omitempty"`
+	EventID         int64       `json:"event_id"`
+	TaskID          string      `json:"task_id"`
+	Type            EventType   `json:"type"`
+	Actor           string      `json:"actor"`
+	At              time.Time   `json:"at"`
+	Body            string      `json:"body"`
+	EvidenceRefs    []string    `json:"evidence_refs"`
+	ExpectedVersion int64       `json:"expected_version"`
+	TargetClient    string      `json:"target_client,omitempty"`
+	Origin          EventOrigin `json:"origin,omitempty"`
+	SubmissionID    string      `json:"submission_id,omitempty"`
+	PolicyDecision  string      `json:"policy_decision,omitempty"`
 }
 
 func (e Event) Validate(taskID string) error {
@@ -70,6 +87,9 @@ func (e Event) Validate(taskID string) error {
 	if e.ExpectedVersion < 0 {
 		return fmt.Errorf("event expected_version must not be negative")
 	}
+	if err := e.validateProvenance(); err != nil {
+		return err
+	}
 	seen := map[string]bool{}
 	for _, ref := range e.EvidenceRefs {
 		if !IsValidID(ref) || seen[ref] {
@@ -78,6 +98,39 @@ func (e Event) Validate(taskID string) error {
 		seen[ref] = true
 	}
 	return nil
+}
+
+func (e Event) validateProvenance() error {
+	switch e.Origin {
+	case "":
+		if e.SubmissionID != "" || e.PolicyDecision != "" {
+			return fmt.Errorf("event provenance fields require origin")
+		}
+	case EventOriginAgent:
+		return ValidateAgentProvenance(e.SubmissionID, e.PolicyDecision)
+	case EventOriginHuman:
+		if e.SubmissionID != "" || !knownHumanPolicyDecision(e.PolicyDecision) {
+			return fmt.Errorf("human event has invalid provenance")
+		}
+	default:
+		return fmt.Errorf("unknown event origin %q", e.Origin)
+	}
+	return nil
+}
+
+func ValidateAgentProvenance(submissionID, decision string) error {
+	if !IsValidID(submissionID) || !knownAgentPolicyDecision(decision) {
+		return fmt.Errorf("agent event requires submission_id and policy_decision")
+	}
+	return nil
+}
+
+func knownAgentPolicyDecision(value string) bool {
+	return value == PolicyDecisionAgentAutoHumanFinal || value == PolicyDecisionAgentAutoAgentFinal
+}
+
+func knownHumanPolicyDecision(value string) bool {
+	return value == PolicyDecisionHumanFinal || value == PolicyDecisionHumanOperator
 }
 
 func DecodeEventLine(data []byte, taskID string) (Event, error) {

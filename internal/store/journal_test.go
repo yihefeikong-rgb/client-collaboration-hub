@@ -402,6 +402,96 @@ func TestCreateTaskDoesNotPublishHalfInitializedDirectory(t *testing.T) {
 	}
 }
 
+func TestApplyAgentSubmissionAddsEvidenceAndTransitionsToReview(t *testing.T) {
+	journal, root := newJournal(t)
+	createTask(t, journal, "T-0001")
+	if _, err := journal.CommitTransition(context.Background(), "T-0001", 1, protocol.TransitionIntent{Action: protocol.Assign, Actor: "codex", NextAssignee: "cc-haha", At: journalTime}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.CommitTransition(context.Background(), "T-0001", 2, protocol.TransitionIntent{Action: protocol.Accept, Actor: "cc-haha", At: journalTime}, nil); err != nil {
+		t.Fatal(err)
+	}
+	result, err := journal.ApplyAgentSubmission(context.Background(), "T-0001", 3, AgentSubmission{
+		ID:       "sub-001",
+		Actor:    "cc-haha",
+		Decision: protocol.PolicyDecisionAgentAutoHumanFinal,
+		Action:   protocol.Submit,
+		Evidence: []protocol.Evidence{
+			{ID: "E-diff", TaskID: "T-0001", Kind: protocol.EvidenceDiff, Summary: "Diff", CreatedBy: "cc-haha", CreatedAt: journalTime},
+			{ID: "E-test", TaskID: "T-0001", Kind: protocol.EvidenceTest, Summary: "Tests", CreatedBy: "cc-haha", CreatedAt: journalTime},
+		},
+		EvidenceRefs: []string{"E-diff", "E-test"},
+		At:           journalTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State.Status != protocol.Review || result.State.Version != 6 || len(result.Events) != 3 {
+		t.Fatalf("result = %#v", result)
+	}
+	for _, event := range result.Events {
+		if event.Origin != protocol.EventOriginAgent || event.SubmissionID != "sub-001" || event.PolicyDecision != protocol.PolicyDecisionAgentAutoHumanFinal {
+			t.Fatalf("event provenance = %#v", event)
+		}
+	}
+	if got := readEvents(t, root, "T-0001"); len(got) != 6 {
+		t.Fatalf("event count = %d", len(got))
+	}
+}
+
+func TestApplyAgentSubmissionRejectsStaleVersionBeforeWritingEvidence(t *testing.T) {
+	journal, root := newJournal(t)
+	createTask(t, journal, "T-0001")
+	_, err := journal.ApplyAgentSubmission(context.Background(), "T-0001", 0, AgentSubmission{
+		ID:       "sub-001",
+		Actor:    "codex",
+		Decision: protocol.PolicyDecisionAgentAutoHumanFinal,
+		Action:   protocol.AddEvidence,
+		Evidence: []protocol.Evidence{{ID: "E-diff", TaskID: "T-0001", Kind: protocol.EvidenceDiff, Summary: "Diff", CreatedBy: "codex", CreatedAt: journalTime}},
+		At:       journalTime,
+	})
+	if !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "tasks", "T-0001", "evidence", "E-diff.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale submission wrote evidence: %v", err)
+	}
+}
+
+func TestApplyAgentSubmissionRejectsHumanFinalApprovalBeforeWriting(t *testing.T) {
+	journal, _ := newJournal(t)
+	createTask(t, journal, "T-0001")
+	before, err := journal.Inspect(context.Background(), "T-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = journal.ApplyAgentSubmission(context.Background(), "T-0001", before.State.Version, AgentSubmission{
+		ID:       "sub-approve",
+		Actor:    "codex",
+		Decision: protocol.PolicyDecisionAgentAutoHumanFinal,
+		Action:   protocol.Approve,
+		At:       journalTime,
+	})
+	if !errors.Is(err, protocol.ErrHumanFinalReviewRequired) {
+		t.Fatalf("error = %v", err)
+	}
+	after, err := journal.Inspect(context.Background(), "T-0001")
+	if err != nil || after.State != before.State {
+		t.Fatalf("after = %#v, %v", after, err)
+	}
+}
+
+func TestCreateTaskFromAgentRecordsProvenance(t *testing.T) {
+	journal, root := newJournal(t)
+	if err := journal.CreateTaskFromAgent(context.Background(), testTask("T-0001"), "sub-create", "codex", protocol.PolicyDecisionAgentAutoHumanFinal, journalTime); err != nil {
+		t.Fatal(err)
+	}
+	event := readEvents(t, root, "T-0001")[0]
+	if event.Origin != protocol.EventOriginAgent || event.SubmissionID != "sub-create" || event.PolicyDecision != protocol.PolicyDecisionAgentAutoHumanFinal {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
 type failingReplacer struct{}
 
 func (failingReplacer) Replace(string, string) error { return errors.New("replace failed") }

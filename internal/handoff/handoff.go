@@ -3,11 +3,13 @@ package handoff
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -60,16 +62,33 @@ type ExportReport struct {
 	PackageID    string
 }
 
+type NextExportReport struct {
+	ExportReport
+	OutputDir          string `json:"output_dir"`
+	FromEventExclusive int64  `json:"from_event_exclusive"`
+	Reused             bool   `json:"reused"`
+}
+
+type HandoffHistoryRecord struct {
+	HandoffHistoryEntry
+	Valid  bool   `json:"valid"`
+	Reason string `json:"reason,omitempty"`
+}
+
 type Publisher interface {
 	Publish(string, DeliveryPackage) error
 }
 
 type Service struct {
-	Query     store.TaskQuery
-	Bindings  store.BindingStore
-	Resolver  store.BindingResolver
-	Registry  store.RegistryStore
-	Publisher Publisher
+	Query         store.TaskQuery
+	Bindings      store.BindingStore
+	Resolver      store.BindingResolver
+	Registry      store.RegistryStore
+	Publisher     Publisher
+	WorkspaceRoot string
+	History       HandoffHistory
+	Locker        store.Locker
+	Clock         func() time.Time
 }
 
 func NewService(query store.TaskQuery, bindings store.BindingStore, resolver store.BindingResolver, registry store.RegistryStore, workspaceRoot ...string) *Service {
@@ -77,13 +96,20 @@ func NewService(query store.TaskQuery, bindings store.BindingStore, resolver sto
 	if len(workspaceRoot) > 0 {
 		root = workspaceRoot[0]
 	}
-	return &Service{
-		Query:     query,
-		Bindings:  bindings,
-		Resolver:  resolver,
-		Registry:  registry,
-		Publisher: NewDirectoryPublisher(root),
+	service := &Service{
+		Query:         query,
+		Bindings:      bindings,
+		Resolver:      resolver,
+		Registry:      registry,
+		Publisher:     NewDirectoryPublisher(root),
+		WorkspaceRoot: root,
+		Locker:        store.FlockLocker{},
+		Clock:         time.Now,
 	}
+	if root != "" {
+		service.History = NewFileHandoffHistory(root, service.Locker)
+	}
+	return service
 }
 
 func (s *Service) Export(ctx context.Context, options ExportOptions) (ExportReport, error) {
@@ -141,6 +167,177 @@ func (s *Service) Export(ctx context.Context, options ExportOptions) (ExportRepo
 		return ExportReport{}, fmt.Errorf("generated handoff manifest is invalid: %w", err)
 	}
 	return ExportReport{Adapter: adapter.Name(), TargetClient: target.ID, TaskID: snapshot.Task.ID, ProjectID: snapshot.Project.ID, ThroughEvent: snapshot.ThroughEvent, PackageID: manifest.PackageID}, nil
+}
+
+func (s *Service) ExportNext(ctx context.Context, taskID string) (NextExportReport, error) {
+	if s.Query == nil || s.Bindings == nil || s.History == nil || s.Locker == nil || strings.TrimSpace(s.WorkspaceRoot) == "" || !protocol.IsValidID(taskID) {
+		return NextExportReport{}, fmt.Errorf("handoff next export is not configured")
+	}
+	lock, err := s.Locker.Lock(ctx, filepath.Join(s.WorkspaceRoot, "collaboration", ".runtime", "locks", "handoff-next", taskID+".lock"))
+	if err != nil {
+		return NextExportReport{}, err
+	}
+	defer lock.Unlock()
+	snapshot, err := s.Query.Snapshot(ctx, taskID, 0)
+	if err != nil {
+		return NextExportReport{}, err
+	}
+	switch snapshot.Health {
+	case store.Healthy:
+	case store.RecoverableTail:
+		return NextExportReport{}, store.ErrRecoveryRequired
+	default:
+		return NextExportReport{}, store.ErrCorrupt
+	}
+	target := nextTarget(snapshot.Task, snapshot.State)
+	adapter := adapterForTarget(target)
+	if adapter == "" {
+		return NextExportReport{}, fmt.Errorf("no automatic handoff adapter for client %q", target)
+	}
+	entry, manifest, found, err := s.latestVerifiedHistory(ctx, taskID, target)
+	if err != nil {
+		return NextExportReport{}, err
+	}
+	if found && entry.ThroughEvent > snapshot.State.LastEventID {
+		return NextExportReport{}, fmt.Errorf("handoff history exceeds current task event")
+	}
+	if found && entry.ThroughEvent == snapshot.State.LastEventID {
+		return NextExportReport{ExportReport: ExportReport{Adapter: entry.Adapter, TargetClient: target, TaskID: taskID, ProjectID: snapshot.Project.ID, ThroughEvent: entry.ThroughEvent, PackageID: manifest.PackageID}, OutputDir: entry.OutputDir, FromEventExclusive: manifest.FromEventExclusive, Reused: true}, nil
+	}
+	afterEvent := int64(0)
+	if found {
+		afterEvent = entry.ThroughEvent
+	}
+	binding, err := s.singleAvailableBinding(ctx, snapshot.Project.ID)
+	if err != nil {
+		return NextExportReport{}, err
+	}
+	outputDir, relativeOutput, err := s.nextOutputDir(taskID, target)
+	if err != nil {
+		return NextExportReport{}, err
+	}
+	report, err := s.Export(ctx, ExportOptions{TaskID: taskID, ClientID: target, Adapter: adapter, DeviceID: binding.DeviceID, AfterEventID: afterEvent, OutputDir: outputDir})
+	if err != nil {
+		return NextExportReport{}, err
+	}
+	manifest, err = VerifyPackage(outputDir)
+	if err != nil {
+		return NextExportReport{}, fmt.Errorf("%w: generated package verification failed: %v", ErrHandoffOutcomeUnknown, err)
+	}
+	entry = HandoffHistoryEntry{TaskID: report.TaskID, TargetClient: report.TargetClient, Adapter: report.Adapter, PackageID: report.PackageID, ThroughEvent: report.ThroughEvent, OutputDir: relativeOutput, CreatedAt: s.now()}
+	if err := s.History.Append(ctx, entry); err != nil {
+		return NextExportReport{}, fmt.Errorf("%w: package published but history was not recorded: %v", ErrHandoffOutcomeUnknown, err)
+	}
+	return NextExportReport{ExportReport: report, OutputDir: relativeOutput, FromEventExclusive: afterEvent}, nil
+}
+
+func (s *Service) ListHistory(ctx context.Context, taskID string) ([]HandoffHistoryRecord, error) {
+	if s.History == nil || !protocol.IsValidID(taskID) {
+		return nil, fmt.Errorf("handoff history is not configured")
+	}
+	entries, err := s.History.List(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	records := make([]HandoffHistoryRecord, 0, len(entries))
+	for _, entry := range entries {
+		record := HandoffHistoryRecord{HandoffHistoryEntry: entry, Valid: true}
+		path, err := resolveRuntimeHandoffPath(s.WorkspaceRoot, entry.OutputDir)
+		if err != nil {
+			record.Valid, record.Reason = false, err.Error()
+		} else if manifest, err := VerifyPackage(path); err != nil {
+			record.Valid, record.Reason = false, err.Error()
+		} else if manifest.PackageID != entry.PackageID || manifest.TaskID != entry.TaskID || manifest.TargetData.ID != entry.TargetClient || manifest.Adapter != entry.Adapter || manifest.ThroughEvent != entry.ThroughEvent {
+			record.Valid, record.Reason = false, "package does not match handoff history"
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
+
+func (s *Service) latestVerifiedHistory(ctx context.Context, taskID, target string) (HandoffHistoryEntry, Manifest, bool, error) {
+	entries, err := s.History.List(ctx, taskID)
+	if err != nil {
+		return HandoffHistoryEntry{}, Manifest{}, false, err
+	}
+	var latest HandoffHistoryEntry
+	var latestManifest Manifest
+	found := false
+	for _, entry := range entries {
+		if entry.TargetClient != target {
+			continue
+		}
+		path, err := resolveRuntimeHandoffPath(s.WorkspaceRoot, entry.OutputDir)
+		if err != nil {
+			return HandoffHistoryEntry{}, Manifest{}, false, err
+		}
+		manifest, err := VerifyPackage(path)
+		if err != nil {
+			return HandoffHistoryEntry{}, Manifest{}, false, fmt.Errorf("handoff history package %q cannot be verified: %w", entry.OutputDir, err)
+		}
+		if manifest.PackageID != entry.PackageID || manifest.TaskID != entry.TaskID || manifest.TargetData.ID != entry.TargetClient || manifest.Adapter != entry.Adapter || manifest.ThroughEvent != entry.ThroughEvent {
+			return HandoffHistoryEntry{}, Manifest{}, false, fmt.Errorf("handoff history package %q does not match its record", entry.OutputDir)
+		}
+		if !found || entry.ThroughEvent > latest.ThroughEvent || (entry.ThroughEvent == latest.ThroughEvent && entry.CreatedAt.After(latest.CreatedAt)) {
+			latest, latestManifest, found = entry, manifest, true
+		}
+	}
+	return latest, latestManifest, found, nil
+}
+
+func (s *Service) singleAvailableBinding(ctx context.Context, projectID string) (store.ProjectBinding, error) {
+	bindings, err := s.Bindings.ListBindings(ctx, projectID)
+	if err != nil {
+		return store.ProjectBinding{}, err
+	}
+	available := make([]store.ProjectBinding, 0, len(bindings))
+	for _, binding := range bindings {
+		if s.Bindings.BindingAvailable(ctx, binding.DeviceID, projectID) {
+			available = append(available, binding)
+		}
+	}
+	if len(available) == 0 {
+		return store.ProjectBinding{}, fmt.Errorf("%w: no available binding for project %q", store.ErrBindingUnavailable, projectID)
+	}
+	if len(available) != 1 {
+		return store.ProjectBinding{}, fmt.Errorf("automatic handoff requires exactly one available binding for project %q", projectID)
+	}
+	return available[0], nil
+}
+
+func (s *Service) nextOutputDir(taskID, target string) (string, string, error) {
+	nonce := make([]byte, 8)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", "", err
+	}
+	name := s.now().Format("20060102T150405.000000000Z") + "-" + hex.EncodeToString(nonce)
+	relative := filepath.Join("collaboration", ".runtime", "handoffs", taskID, target, name)
+	return filepath.Join(s.WorkspaceRoot, relative), filepath.ToSlash(relative), nil
+}
+
+func (s *Service) now() time.Time {
+	if s.Clock == nil {
+		return time.Now().UTC()
+	}
+	return s.Clock().UTC()
+}
+
+func nextTarget(task protocol.Task, state protocol.State) string {
+	if state.Status == protocol.Blocked {
+		return task.Creator
+	}
+	return state.ResponsibleClient
+}
+
+func adapterForTarget(clientID string) string {
+	switch clientID {
+	case "codex":
+		return "manual-codex"
+	case "cc-haha":
+		return "manual-cc-haha"
+	default:
+		return ""
+	}
 }
 
 func (s *Service) validatePortableSnapshot(ctx context.Context, snapshot store.TaskSnapshot, binding store.ProjectBinding, target protocol.Client) error {

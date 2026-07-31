@@ -314,11 +314,15 @@ func hasEvidenceKind(refs []string, kinds map[string]protocol.EvidenceKind, want
 }
 
 func ValidateResponsePackage(packageDir, inputPath string) (ResponseValidation, error) {
-	manifest, err := VerifyPackage(packageDir)
+	data, err := os.ReadFile(inputPath)
 	if err != nil {
 		return ResponseValidation{}, err
 	}
-	data, err := os.ReadFile(inputPath)
+	return ValidateResponseBytes(packageDir, data)
+}
+
+func ValidateResponseBytes(packageDir string, data []byte) (ResponseValidation, error) {
+	manifest, err := VerifyPackage(packageDir)
 	if err != nil {
 		return ResponseValidation{}, err
 	}

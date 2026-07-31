@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/protocol"
@@ -27,6 +28,7 @@ type ProjectBinding struct {
 type BindingStore interface {
 	BindProject(context.Context, ProjectBinding) error
 	ReadBinding(context.Context, string, string) (ProjectBinding, error)
+	ListBindings(context.Context, string) ([]ProjectBinding, error)
 	BindingAvailable(context.Context, string, string) bool
 }
 
@@ -97,6 +99,40 @@ func (s *FileBindingStore) ReadBinding(ctx context.Context, deviceID, projectID 
 		return binding, err
 	}
 	return binding, nil
+}
+
+func (s *FileBindingStore) ListBindings(ctx context.Context, projectID string) ([]ProjectBinding, error) {
+	if !protocol.IsValidID(projectID) {
+		return nil, fmt.Errorf("invalid project id")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(filepath.Join(s.Root, "bindings"))
+	if errors.Is(err, os.ErrNotExist) {
+		return []ProjectBinding{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	result := make([]ProjectBinding, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() || !protocol.IsValidID(entry.Name()) {
+			return nil, fmt.Errorf("unsafe binding directory %q", entry.Name())
+		}
+		binding, err := s.ReadBinding(ctx, entry.Name(), projectID)
+		if errors.Is(err, ErrBindingUnavailable) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, binding)
+	}
+	sort.Slice(result, func(left, right int) bool {
+		return result[left].DeviceID < result[right].DeviceID
+	})
+	return result, nil
 }
 
 func (s *FileBindingStore) BindingAvailable(ctx context.Context, deviceID, projectID string) bool {

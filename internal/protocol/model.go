@@ -10,9 +10,73 @@ import (
 var idPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]{0,63}$`)
 
 type Project struct {
-	ID        string    `yaml:"id"`
-	Name      string    `yaml:"name"`
-	CreatedAt time.Time `yaml:"created_at"`
+	ID                  string              `yaml:"id"`
+	Name                string              `yaml:"name"`
+	CreatedAt           time.Time           `yaml:"created_at"`
+	CollaborationPolicy CollaborationPolicy `yaml:"collaboration_policy"`
+	PolicyVersion       int64               `yaml:"policy_version"`
+	PolicyHistory       []PolicyAuditEntry  `yaml:"policy_history,omitempty"`
+}
+
+type SubmissionMode string
+
+const SubmissionModeAgentAuto SubmissionMode = "agent_auto"
+
+type FinalReviewMode string
+
+const (
+	FinalReviewHuman FinalReviewMode = "human"
+	FinalReviewAgent FinalReviewMode = "agent"
+)
+
+type CollaborationPolicy struct {
+	SubmissionMode SubmissionMode  `yaml:"submission_mode"`
+	FinalReview    FinalReviewMode `yaml:"final_review"`
+	AutoDone       bool            `yaml:"auto_done"`
+}
+
+type PolicyAuditEntry struct {
+	Version  int64               `yaml:"version"`
+	Actor    string              `yaml:"actor"`
+	Origin   EventOrigin         `yaml:"origin"`
+	At       time.Time           `yaml:"at"`
+	Previous CollaborationPolicy `yaml:"previous"`
+	Current  CollaborationPolicy `yaml:"current"`
+}
+
+func DefaultCollaborationPolicy() CollaborationPolicy {
+	return CollaborationPolicy{
+		SubmissionMode: SubmissionModeAgentAuto,
+		FinalReview:    FinalReviewHuman,
+		AutoDone:       false,
+	}
+}
+
+func (p Project) NormalizePolicy() Project {
+	if p.CollaborationPolicy == (CollaborationPolicy{}) && p.PolicyVersion == 0 && len(p.PolicyHistory) == 0 {
+		p.CollaborationPolicy = DefaultCollaborationPolicy()
+		p.PolicyVersion = 1
+	}
+	return p
+}
+
+func (p CollaborationPolicy) Validate() error {
+	if p.SubmissionMode != SubmissionModeAgentAuto {
+		return fmt.Errorf("invalid submission_mode %q", p.SubmissionMode)
+	}
+	switch p.FinalReview {
+	case FinalReviewHuman:
+		if p.AutoDone {
+			return fmt.Errorf("human final_review requires auto_done false")
+		}
+	case FinalReviewAgent:
+		if !p.AutoDone {
+			return fmt.Errorf("agent final_review requires auto_done true")
+		}
+	default:
+		return fmt.Errorf("invalid final_review %q", p.FinalReview)
+	}
+	return nil
 }
 
 type Client struct {
@@ -48,7 +112,31 @@ func (p Project) Validate(expectedID string) error {
 	if err := ValidatePortableText("project name", p.Name); err != nil {
 		return err
 	}
-	return validateUTCTime("project created_at", p.CreatedAt)
+	if err := validateUTCTime("project created_at", p.CreatedAt); err != nil {
+		return err
+	}
+	if p.PolicyVersion < 1 {
+		return fmt.Errorf("project policy_version must be positive")
+	}
+	if err := p.CollaborationPolicy.Validate(); err != nil {
+		return err
+	}
+	if int64(len(p.PolicyHistory))+1 != p.PolicyVersion {
+		return fmt.Errorf("project policy history does not match policy_version")
+	}
+	previous := DefaultCollaborationPolicy()
+	previousAt := p.CreatedAt
+	for index, entry := range p.PolicyHistory {
+		if entry.Version != int64(index+2) || !IsValidID(entry.Actor) || entry.Origin != EventOriginHuman || entry.Previous != previous || entry.Current.Validate() != nil || validateUTCTime("project policy audit at", entry.At) != nil || entry.At.Before(previousAt) {
+			return fmt.Errorf("invalid project policy audit entry")
+		}
+		previous = entry.Current
+		previousAt = entry.At
+	}
+	if len(p.PolicyHistory) > 0 && previous != p.CollaborationPolicy {
+		return fmt.Errorf("project policy does not match latest audit entry")
+	}
+	return nil
 }
 
 func (c Client) Validate(expectedID string) error {

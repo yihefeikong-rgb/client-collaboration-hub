@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/agentintake"
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/handoff"
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/protocol"
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/store"
+	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/version"
 )
 
 var errUsage = errors.New("invalid command or arguments")
@@ -29,16 +31,32 @@ func (a *App) run(ctx context.Context, args []string, jsonOutput bool) (int, err
 	switch {
 	case len(args) == 1 && args[0] == "init":
 		return a.init(jsonOutput)
+	case matches(args, "ui"):
+		return a.ui(ctx, args[1:], jsonOutput)
+	case len(args) == 1 && args[0] == "mcp":
+		if jsonOutput {
+			return ExitValidation, errUsage
+		}
+		if err := a.runMCP(ctx); err != nil {
+			return exitCode(err), err
+		}
+		return ExitOK, nil
 	case matches(args, "client", "register"):
 		return a.clientRegister(ctx, args[2:], jsonOutput)
 	case matches(args, "project", "create"):
 		return a.projectCreate(ctx, args[2:], jsonOutput)
+	case matches(args, "project", "register-local"):
+		return a.projectRegisterLocal(ctx, args[2:], jsonOutput)
 	case matches(args, "project", "bind"):
 		return a.projectBind(ctx, args[2:], jsonOutput)
 	case matches(args, "project", "binding-status"):
 		return a.projectBindingStatus(ctx, args[2:], jsonOutput)
 	case matches(args, "task", "create"):
 		return a.taskCreate(ctx, args[2:], jsonOutput)
+	case matches(args, "agent", "task-create"):
+		return a.agentTaskCreate(ctx, args[2:], jsonOutput)
+	case matches(args, "agent", "submit"):
+		return a.agentSubmit(ctx, args[2:], jsonOutput)
 	case matches(args, "task", "assign"):
 		return a.transition(ctx, args[2:], jsonOutput, protocol.Assign)
 	case matches(args, "task", "accept"):
@@ -57,17 +75,44 @@ func (a *App) run(ctx context.Context, args []string, jsonOutput bool) (int, err
 		return a.transition(ctx, args[2:], jsonOutput, protocol.RequestChanges)
 	case matches(args, "review", "approve"):
 		return a.transition(ctx, args[2:], jsonOutput, protocol.Approve)
+	case len(args) == 1 && args[0] == "version":
+		return a.versionCommand(jsonOutput)
 	case matches(args, "status"):
 		return a.status(ctx, args[1:], jsonOutput)
 	case matches(args, "recover"):
 		return a.recover(ctx, args[1:], jsonOutput)
 	case matches(args, "handoff", "export"):
 		return a.handoffExport(ctx, args[2:], jsonOutput)
+	case matches(args, "handoff", "next"):
+		return a.handoffNext(ctx, args[2:], jsonOutput)
 	case matches(args, "response", "validate"):
 		return a.responseValidate(ctx, args[2:], jsonOutput)
 	default:
 		return ExitValidation, errUsage
 	}
+}
+
+func (a *App) projectRegisterLocal(ctx context.Context, args []string, jsonOutput bool) (int, error) {
+	fs := newFlagSet("project register-local")
+	id := fs.String("id", "", "")
+	name := fs.String("name", "", "")
+	localPath := fs.String("path", "", "")
+	if err := parse(fs, args); err != nil {
+		return ExitValidation, err
+	}
+	if err := require("path", *localPath); err != nil {
+		return ExitValidation, errUsage
+	}
+	result, err := a.RegisterLocalProject(ctx, *id, *name, *localPath)
+	if err != nil {
+		return exitCode(err), err
+	}
+	if jsonOutput {
+		a.writeJSON(result)
+	} else {
+		fmt.Fprintf(a.Stdout, "project_id: %s\nname: %s\ndevice_id: %s\nlocal_path: %s\n", result.ProjectID, result.Name, result.DeviceID, result.LocalPath)
+	}
+	return ExitOK, nil
 }
 
 func matches(args []string, words ...string) bool {
@@ -268,6 +313,64 @@ func (a *App) taskCreate(ctx context.Context, args []string, jsonOutput bool) (i
 	return a.outputTaskState(ctx, task.ID, jsonOutput)
 }
 
+func (a *App) agentTaskCreate(ctx context.Context, args []string, jsonOutput bool) (int, error) {
+	fs := newFlagSet("agent task-create")
+	input := fs.String("input", "", "")
+	if err := parse(fs, args); err != nil {
+		return ExitValidation, err
+	}
+	if err := require("input", *input); err != nil {
+		return ExitValidation, errUsage
+	}
+	result, err := a.Intake.CreateTask(ctx, a.workspacePath(*input))
+	if err != nil {
+		if result.Receipt.ID != "" {
+			a.writeAgentSubmission(jsonOutput, result)
+		}
+		return exitCode(err), err
+	}
+	a.writeAgentSubmission(jsonOutput, result)
+	return agentSubmissionExitCode(result.Receipt.Status), nil
+}
+
+func (a *App) agentSubmit(ctx context.Context, args []string, jsonOutput bool) (int, error) {
+	fs := newFlagSet("agent submit")
+	packageDir := fs.String("package", "", "")
+	input := fs.String("input", "", "")
+	if err := parse(fs, args); err != nil {
+		return ExitValidation, err
+	}
+	if err := require("package", *packageDir, "input", *input); err != nil {
+		return ExitValidation, errUsage
+	}
+	result, err := a.Intake.SubmitResponse(ctx, a.workspacePath(*packageDir), a.workspacePath(*input))
+	if err != nil {
+		if result.Receipt.ID != "" {
+			a.writeAgentSubmission(jsonOutput, result)
+		}
+		return exitCode(err), err
+	}
+	a.writeAgentSubmission(jsonOutput, result)
+	return agentSubmissionExitCode(result.Receipt.Status), nil
+}
+
+func (a *App) workspacePath(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(a.WorkingDirectory, path)
+}
+
+func agentSubmissionExitCode(status agentintake.ReceiptStatus) int {
+	if status == agentintake.Accepted {
+		return ExitOK
+	}
+	if status == agentintake.Unknown {
+		return ExitUnknown
+	}
+	return ExitValidation
+}
+
 func (a *App) transition(ctx context.Context, args []string, jsonOutput bool, action protocol.Action) (int, error) {
 	fs := newFlagSet("transition")
 	task := fs.String("task", "", "")
@@ -300,7 +403,15 @@ func (a *App) transition(ctx context.Context, args []string, jsonOutput bool, ac
 	if (action == protocol.Submit || action == protocol.Block) && len(evidence) == 0 {
 		return ExitValidation, errUsage
 	}
-	intent := protocol.TransitionIntent{Action: action, Actor: *actor, NextAssignee: *client, Feedback: *body, At: a.now()}
+	snapshot, err := a.Query.Snapshot(ctx, *task, 0)
+	if err != nil {
+		return exitCode(err), err
+	}
+	decision, err := protocol.HumanPolicyDecision(snapshot.Project.CollaborationPolicy, action)
+	if err != nil {
+		return exitCode(err), err
+	}
+	intent := protocol.TransitionIntent{Action: action, Actor: *actor, NextAssignee: *client, Feedback: *body, At: a.now(), Origin: protocol.EventOriginHuman, PolicyDecision: decision}
 	state, err := a.Journal.CommitTransition(ctx, *task, *expected, intent, evidence)
 	if err != nil {
 		return exitCode(err), err
@@ -346,6 +457,15 @@ func (a *App) evidenceAdd(ctx context.Context, args []string, jsonOutput bool) (
 		return exitCode(err), err
 	}
 	a.writeEvidenceResult(jsonOutput, result)
+	return ExitOK, nil
+}
+
+func (a *App) versionCommand(jsonOutput bool) (int, error) {
+	if jsonOutput {
+		a.writeJSON(map[string]string{"version": version.Version})
+	} else {
+		fmt.Fprintln(a.Stdout, version.Version)
+	}
 	return ExitOK, nil
 }
 
@@ -404,13 +524,30 @@ func (a *App) handoffExport(ctx context.Context, args []string, jsonOutput bool)
 	}
 	outputPath := *output
 	if !filepath.IsAbs(outputPath) {
-		outputPath = filepath.Join(a.Root, outputPath)
+		outputPath = a.workspacePath(outputPath)
 	}
 	report, err := a.Handoff.Export(ctx, handoff.ExportOptions{TaskID: *task, ClientID: *client, Adapter: *adapter, DeviceID: *device, AfterEventID: *afterEvent, OutputDir: outputPath})
 	if err != nil {
 		return exitCode(err), err
 	}
 	a.writeHandoff(jsonOutput, report)
+	return ExitOK, nil
+}
+
+func (a *App) handoffNext(ctx context.Context, args []string, jsonOutput bool) (int, error) {
+	fs := newFlagSet("handoff next")
+	task := fs.String("task", "", "")
+	if err := parse(fs, args); err != nil {
+		return ExitValidation, err
+	}
+	if err := require("task", *task); err != nil {
+		return ExitValidation, errUsage
+	}
+	report, err := a.Handoff.ExportNext(ctx, *task)
+	if err != nil {
+		return exitCode(err), err
+	}
+	a.writeHandoffNext(jsonOutput, report)
 	return ExitOK, nil
 }
 
@@ -425,10 +562,10 @@ func (a *App) responseValidate(_ context.Context, args []string, jsonOutput bool
 		return ExitValidation, errUsage
 	}
 	if !filepath.IsAbs(*packageDir) {
-		*packageDir = filepath.Join(a.Root, *packageDir)
+		*packageDir = a.workspacePath(*packageDir)
 	}
 	if !filepath.IsAbs(*input) {
-		*input = filepath.Join(a.Root, *input)
+		*input = a.workspacePath(*input)
 	}
 	result, err := handoff.ValidateResponsePackage(*packageDir, *input)
 	if err != nil {

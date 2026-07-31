@@ -6,18 +6,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/protocol"
 	"gopkg.in/yaml.v3"
 )
 
 var (
-	ErrNotFound      = errors.New("resource not found")
-	ErrAlreadyExists = errors.New("resource already exists")
+	ErrNotFound              = errors.New("resource not found")
+	ErrAlreadyExists         = errors.New("resource already exists")
+	ErrPolicyVersionConflict = errors.New("project policy version conflict")
 )
 
 type RegistryStore interface {
 	CreateProject(context.Context, protocol.Project) error
+	UpdateProjectPolicy(context.Context, string, int64, string, protocol.CollaborationPolicy, time.Time) (protocol.Project, error)
 	RegisterClient(context.Context, protocol.Client) error
 	ReadProject(context.Context, string) (protocol.Project, error)
 	ReadClient(context.Context, string) (protocol.Client, error)
@@ -43,6 +46,7 @@ func NewFileRegistryStore(root string, locker Locker) *FileRegistryStore {
 }
 
 func (r *FileRegistryStore) CreateProject(ctx context.Context, project protocol.Project) error {
+	project = project.NormalizePolicy()
 	if err := project.Validate(project.ID); err != nil {
 		return err
 	}
@@ -52,6 +56,51 @@ func (r *FileRegistryStore) CreateProject(ctx context.Context, project protocol.
 	}
 	defer lock.Unlock()
 	return r.createProject(project)
+}
+
+func (r *FileRegistryStore) UpdateProjectPolicy(ctx context.Context, id string, expectedVersion int64, actor string, policy protocol.CollaborationPolicy, at time.Time) (protocol.Project, error) {
+	if !protocol.IsValidID(id) || expectedVersion < 1 || !protocol.IsValidID(actor) || at.IsZero() || at.Location() != time.UTC {
+		return protocol.Project{}, fmt.Errorf("invalid project policy update")
+	}
+	if err := policy.Validate(); err != nil {
+		return protocol.Project{}, err
+	}
+	lock, err := r.Locks.Projects(ctx)
+	if err != nil {
+		return protocol.Project{}, err
+	}
+	defer lock.Unlock()
+	project, err := r.ReadProject(ctx, id)
+	if err != nil {
+		return protocol.Project{}, err
+	}
+	if project.PolicyVersion != expectedVersion {
+		return protocol.Project{}, ErrPolicyVersionConflict
+	}
+	if at.Before(project.CreatedAt) {
+		return protocol.Project{}, fmt.Errorf("project policy update time is before project creation")
+	}
+	project.PolicyHistory = append(project.PolicyHistory, protocol.PolicyAuditEntry{
+		Version:  project.PolicyVersion + 1,
+		Actor:    actor,
+		Origin:   protocol.EventOriginHuman,
+		At:       at,
+		Previous: project.CollaborationPolicy,
+		Current:  policy,
+	})
+	project.CollaborationPolicy = policy
+	project.PolicyVersion++
+	if err := project.Validate(id); err != nil {
+		return protocol.Project{}, err
+	}
+	data, err := yaml.Marshal(project)
+	if err != nil {
+		return protocol.Project{}, err
+	}
+	if err := writeAtomically(r.FS, r.Replacer, r.projectPath(id), ".project-*.tmp", append(data, '\n')); err != nil {
+		return protocol.Project{}, err
+	}
+	return project, nil
 }
 
 func (r *FileRegistryStore) RegisterClient(ctx context.Context, client protocol.Client) error {

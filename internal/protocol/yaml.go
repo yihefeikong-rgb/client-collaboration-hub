@@ -27,10 +27,49 @@ func DecodeProject(data []byte, path string) (Project, error) {
 	if err := decodeYAML(data, &project); err != nil {
 		return project, fmt.Errorf("decode project: %w", err)
 	}
+	policyPresent, err := projectPolicyFieldsPresent(data)
+	if err != nil {
+		return project, err
+	}
+	if !policyPresent.policy && !policyPresent.version && !policyPresent.history {
+		project = project.NormalizePolicy()
+	} else if !policyPresent.policy || !policyPresent.version {
+		return project, fmt.Errorf("project collaboration policy fields are incomplete")
+	}
 	if err := project.Validate(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))); err != nil {
 		return project, err
 	}
 	return project, nil
+}
+
+type projectPolicyFields struct {
+	policy  bool
+	version bool
+	history bool
+}
+
+func projectPolicyFieldsPresent(data []byte) (projectPolicyFields, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		return projectPolicyFields{}, err
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return projectPolicyFields{}, fmt.Errorf("project yaml must be a mapping")
+	}
+	fields := projectPolicyFields{}
+	mapping := document.Content[0]
+	for index := 0; index < len(mapping.Content); index += 2 {
+		switch mapping.Content[index].Value {
+		case "collaboration_policy":
+			fields.policy = true
+		case "policy_version":
+			fields.version = true
+		case "policy_history":
+			fields.history = true
+		}
+	}
+	return fields, nil
 }
 
 func DecodeClient(data []byte, path string) (Client, error) {

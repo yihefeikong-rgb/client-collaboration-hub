@@ -114,8 +114,15 @@ func (p DirectoryPublisher) validateWorkspaceOutput(outputDir string) error {
 		return fmt.Errorf("%w: repository root", ErrHandoffUnsafeOutput)
 	}
 	collaboration := filepath.Join(root, "collaboration")
-	if samePath(collaboration, outputDir) || pathWithin(collaboration, outputDir) {
+	runtimeHandoffs := filepath.Join(collaboration, ".runtime", "handoffs")
+	runtimeOutput := pathWithin(runtimeHandoffs, outputDir) && !samePath(runtimeHandoffs, outputDir)
+	if samePath(collaboration, outputDir) || (pathWithin(collaboration, outputDir) && !runtimeOutput) {
 		return fmt.Errorf("%w: collaboration data", ErrHandoffUnsafeOutput)
+	}
+	if runtimeOutput {
+		if err := validateRuntimeHandoffRoot(root); err != nil {
+			return err
+		}
 	}
 	parent := filepath.Dir(outputDir)
 	resolvedParent, err := filepath.EvalSymlinks(parent)
@@ -131,8 +138,40 @@ func (p DirectoryPublisher) validateWorkspaceOutput(outputDir string) error {
 		return err
 	}
 	resolvedCollaboration := filepath.Join(resolvedRoot, "collaboration")
-	if samePath(resolvedRoot, resolvedOutput) || samePath(resolvedCollaboration, resolvedOutput) || pathWithin(resolvedCollaboration, resolvedOutput) {
+	resolvedRuntimeHandoffs := filepath.Join(resolvedCollaboration, ".runtime", "handoffs")
+	if samePath(resolvedRoot, resolvedOutput) || samePath(resolvedCollaboration, resolvedOutput) {
 		return fmt.Errorf("%w: resolved collaboration data", ErrHandoffUnsafeOutput)
+	}
+	if runtimeOutput {
+		resolvedRuntimeHandoffs, err = filepath.EvalSymlinks(runtimeHandoffs)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil || samePath(resolvedRuntimeHandoffs, resolvedOutput) || !pathWithin(resolvedRuntimeHandoffs, resolvedOutput) {
+			return fmt.Errorf("%w: resolved runtime handoff data", ErrHandoffUnsafeOutput)
+		}
+		return nil
+	}
+	if pathWithin(resolvedCollaboration, resolvedOutput) {
+		return fmt.Errorf("%w: resolved collaboration data", ErrHandoffUnsafeOutput)
+	}
+	return nil
+}
+
+func validateRuntimeHandoffRoot(root string) error {
+	path := root
+	for _, part := range []string{"collaboration", ".runtime", "handoffs"} {
+		path = filepath.Join(path, part)
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("%w: runtime handoff root is unsafe", ErrHandoffUnsafeOutput)
+		}
 	}
 	return nil
 }

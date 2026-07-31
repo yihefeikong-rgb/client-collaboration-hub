@@ -13,6 +13,7 @@ trap cleanup EXIT
 binary="$temp_root/collab"
 (cd "$repo_root" && go build -o "$binary" ./cmd/collab)
 workspace="$temp_root/workspace"
+export COLLAB_HOME="$workspace"
 project_path="$workspace/project"
 mkdir -p "$project_path/changes" "$project_path/reports"
 printf 'diff' > "$project_path/changes/fix.diff"
@@ -32,8 +33,6 @@ PY
 }
 
 run_json init
-run_json client register --id codex --name Codex --capability create_task --capability review --capability import_export
-run_json client register --id cc-haha --name CC-HAHA --capability execute --capability import_export
 run_json project create --id project-1 --name Demo
 run_json project bind --project project-1 --device device-1 --path "$project_path" --revision r1
 run_json task create --id T-0001 --project project-1 --title "Binary workflow" --objective "Verify binary E2E" --acceptance "Tests pass" --creator codex

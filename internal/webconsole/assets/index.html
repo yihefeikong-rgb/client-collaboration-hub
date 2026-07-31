@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>client-collaboration-hub</title>
+    <link rel="stylesheet" href="/assets/style.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">↗</span>
+          <span>client-collaboration-hub</span>
+        </div>
+
+        <nav class="primary-nav" aria-label="控制台页面">
+          <p class="nav-heading">工作</p>
+          <button type="button" class="nav-item is-active" data-view-target="queue" aria-current="page">待我审查</button>
+          <button type="button" class="nav-item" data-view-target="activity">协作活动</button>
+          <button type="button" class="nav-item" data-view-target="handoff">交接历史</button>
+          <button type="button" class="nav-item" data-view-target="evidence">Evidence</button>
+          <p class="nav-heading nav-heading-spaced">管理</p>
+          <button type="button" class="nav-item" data-view-target="setup">设置与登记</button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <span>LOCAL MODE</span>
+          <strong id="storage-state">读取中</strong>
+        </div>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <div class="context-path">
+            <span>本地协作中枢</span>
+            <span aria-hidden="true">/</span>
+            <label class="project-switcher">
+              <span class="visually-hidden">选择项目</span>
+              <select id="project-select" aria-label="选择项目"><option value="">全部项目</option></select>
+            </label>
+          </div>
+          <div class="topbar-actions">
+            <span class="local-only">仅本机</span>
+            <button id="refresh" type="button" class="button button-quiet">刷新数据</button>
+          </div>
+        </header>
+
+        <div id="status" class="status-line" role="status">正在读取本地协作存储…</div>
+
+        <main class="main-content">
+          <section id="queue-view" class="view" aria-labelledby="queue-heading">
+            <div class="page-heading queue-heading">
+              <div>
+                <p class="eyebrow">HUMAN FINAL REVIEW</p>
+                <h1 id="queue-heading">待我审查</h1>
+                <p>代理负责推进工作；这里优先显示需要你做最终判断的任务。</p>
+              </div>
+            </div>
+
+            <section id="not-initialized" class="notice-block" hidden aria-labelledby="not-initialized-heading">
+              <div>
+                <p class="eyebrow">SETUP REQUIRED</p>
+                <h2 id="not-initialized-heading">协作中枢尚未初始化</h2>
+                <p>初始化只会建立本机全局协作存储；不会连接或控制任何客户端。</p>
+              </div>
+              <button id="initialize" type="button" class="button">初始化中枢</button>
+            </section>
+
+            <div class="queue-filter-bar" aria-label="任务状态筛选">
+              <button type="button" class="filter-tab" data-status-filter="ALL">全部 <span id="count-all">0</span></button>
+              <button type="button" class="filter-tab is-active" data-status-filter="REVIEW">待我审查 <span id="count-review">0</span></button>
+              <button type="button" class="filter-tab" data-status-filter="WORKING">执行中 <span id="count-working">0</span></button>
+              <button type="button" class="filter-tab" data-status-filter="REVISION_REQUIRED">待返工 <span id="count-revision">0</span></button>
+              <button type="button" class="filter-tab" data-status-filter="BLOCKED">已阻塞 <span id="count-blocked">0</span></button>
+              <label class="queue-search"><span class="visually-hidden">搜索任务</span><input id="task-search" type="search" placeholder="搜索任务 ID 或标题"></label>
+            </div>
+
+            <div class="queue-layout">
+              <section class="ledger-surface" aria-labelledby="ledger-heading">
+                <div class="ledger-heading">
+                  <div>
+                    <h2 id="ledger-heading">任务账本</h2>
+                    <p id="queue-description">读取中…</p>
+                  </div>
+                  <span class="column-hint">状态、责任与版本均来自状态快照</span>
+                </div>
+                <div class="table-wrap">
+                  <table class="task-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">任务</th>
+                        <th scope="col">状态</th>
+                        <th scope="col">当前责任</th>
+                        <th scope="col">下一步</th>
+                        <th scope="col">版本 / 事件</th>
+                        <th scope="col">数据健康</th>
+                      </tr>
+                    </thead>
+                    <tbody id="tasks"></tbody>
+                  </table>
+                </div>
+                <div id="queue-empty" class="empty-state" hidden>
+                  <h3>当前队列没有匹配任务</h3>
+                  <p>当任务被创建、提交审查或标记阻塞后，它会出现在对应的工作队列中。</p>
+                </div>
+              </section>
+
+              <aside class="queue-aside" aria-labelledby="work-guidance-heading">
+                <section class="aside-section">
+                  <p class="eyebrow">NEXT WORK</p>
+                  <h2 id="work-guidance-heading">你的审核队列</h2>
+                  <ul id="attention-list" class="attention-list"></ul>
+                </section>
+                <section class="aside-section aside-section-divider">
+                  <p class="eyebrow">LOCAL STATE</p>
+                  <dl class="compact-meta">
+                    <div><dt>协作存储</dt><dd id="queue-storage-health">读取中</dd></div>
+                    <div><dt>本机 Binding</dt><dd id="queue-binding-summary">选择任务后检查</dd></div>
+                    <div><dt>客户端</dt><dd id="queue-client-summary">读取中</dd></div>
+                  </dl>
+                </section>
+              </aside>
+            </div>
+          </section>
+
+          <section id="task-view" class="view" hidden aria-labelledby="task-heading">
+            <div class="detail-backbar">
+              <button id="back-to-queue" type="button" class="button button-quiet">← 返回工作队列</button>
+              <span id="task-project-context"></span>
+            </div>
+
+            <header class="task-header">
+              <div>
+                <p id="task-id" class="eyebrow">TASK</p>
+                <h1 id="task-heading">尚未选择任务</h1>
+                <p id="task-subtitle" class="task-subtitle"></p>
+              </div>
+              <span id="task-status" class="status-label">—</span>
+            </header>
+
+            <ol id="state-rail" class="state-rail" aria-label="任务状态轨迹">
+              <li data-state="DRAFT"><span></span><small>DRAFT</small></li>
+              <li data-state="ASSIGNED"><span></span><small>ASSIGNED</small></li>
+              <li data-state="WORKING"><span></span><small>WORKING</small></li>
+              <li data-state="REVIEW"><span></span><small>REVIEW</small></li>
+              <li data-state="REVISION_REQUIRED"><span></span><small>REVISION REQUIRED</small></li>
+              <li data-state="DONE"><span></span><small>DONE</small></li>
+            </ol>
+
+            <div class="task-metadata" aria-label="任务快照">
+              <div><span>Expected version</span><strong id="task-version">—</strong></div>
+              <div><span>当前责任方</span><strong id="task-responsible">—</strong></div>
+              <div><span>分配给</span><strong id="task-assigned">—</strong></div>
+              <div><span>数据健康</span><strong id="task-health">—</strong></div>
+              <div><span>最后有效事件</span><strong id="task-event">—</strong></div>
+              <div><span>最近更新</span><strong id="task-updated">—</strong></div>
+            </div>
+
+            <div class="task-layout">
+              <article class="review-canvas">
+                <section class="review-section" aria-labelledby="objective-heading">
+                  <div class="section-kicker"><p class="eyebrow">TASK BRIEF</p><h2 id="objective-heading">目标与验收</h2></div>
+                  <p id="task-objective" class="task-objective"></p>
+                  <ol id="acceptance-list" class="acceptance-list"></ol>
+                </section>
+
+                <section class="review-section" aria-labelledby="coverage-heading">
+                  <div class="section-kicker"><p class="eyebrow">EVIDENCE</p><h2 id="coverage-heading">审查材料</h2></div>
+                  <p class="section-note">Evidence 是不可变审计材料，不是普通附件。先确认类型、来源与版本，再阅读原始内容。</p>
+                  <div id="evidence-list" class="evidence-list"></div>
+                  <div id="evidence-empty" class="empty-inline" hidden>尚无已登记的 Evidence。</div>
+                </section>
+
+                <section class="review-section" aria-labelledby="events-heading">
+                  <div class="section-kicker"><p class="eyebrow">EVENT LEDGER</p><h2 id="events-heading">追加式事件账本</h2></div>
+                  <ol id="event-list" class="event-ledger"></ol>
+                  <div id="event-empty" class="empty-inline" hidden>尚无事件。</div>
+                </section>
+              </article>
+
+              <aside class="review-aside" aria-label="任务操作">
+                <section class="action-panel">
+                  <p class="eyebrow">NEXT ACTION</p>
+                  <h2 id="next-action-title">读取任务后显示</h2>
+                  <p id="next-action-description"></p>
+                  <p id="binding-status" class="binding-note"></p>
+                  <div id="task-actions" class="action-list"></div>
+                </section>
+                <section class="action-panel action-panel-divider">
+                  <p class="eyebrow">REVIEW CONTEXT</p>
+                  <dl id="task-roles" class="compact-meta"></dl>
+                </section>
+              </aside>
+            </div>
+          </section>
+
+          <section id="evidence-view" class="view" hidden aria-labelledby="evidence-heading">
+            <div class="page-heading">
+              <div>
+                <p class="eyebrow">EVIDENCE EXPLORER</p>
+                <h1 id="evidence-heading">Evidence</h1>
+                <p>从任务详情进入材料；此页保留当前选中任务的审查索引。</p>
+              </div>
+              <button id="open-selected-task" type="button" class="button button-quiet" disabled>打开当前任务</button>
+            </div>
+            <section class="ledger-surface evidence-surface">
+              <div id="evidence-explorer" class="evidence-list"></div>
+              <div id="evidence-explorer-empty" class="empty-state">
+                <h2>先选择一个任务</h2>
+                <p>任务的 Evidence 会按登记顺序、类型和来源显示在这里。</p>
+              </div>
+            </section>
+          </section>
+
+          <section id="activity-view" class="view" hidden aria-labelledby="activity-heading">
+            <div class="page-heading">
+              <div>
+                <p class="eyebrow">AGENT INTAKE</p>
+                <h1 id="activity-heading">协作活动</h1>
+                <p>客户端通过本地 <span class="mono">collab</span> 命令提交候选事实；这里显示已接收、已登记和需要处理的异常。</p>
+              </div>
+              <button id="activity-open-task" type="button" class="button button-quiet" disabled>打开当前任务</button>
+            </div>
+            <div class="activity-layout">
+              <section class="ledger-surface activity-surface" aria-labelledby="submission-heading">
+                <div class="ledger-heading"><div><h2 id="submission-heading">代理提交收件箱</h2><p>失败的候选会保留原因，不会改变任务状态。</p></div></div>
+                <div id="submission-list" class="activity-list"></div>
+                <div id="submission-empty" class="empty-state" hidden><h3>尚无代理提交</h3><p>当 Codex 或 CC-HAHA 通过本地 CLI 提交候选任务或候选响应后，会在这里留下回执。</p></div>
+              </section>
+              <section class="ledger-surface activity-surface" aria-labelledby="activity-events-heading">
+                <div class="ledger-heading"><div><h2 id="activity-events-heading">当前任务事件</h2><p id="activity-task-note">选择一个任务后查看其追加式事件账本。</p></div></div>
+                <ol id="activity-event-list" class="event-ledger activity-events"></ol>
+                <div id="activity-events-empty" class="empty-state"><h3>尚未选择任务</h3><p>任务事件不会伪装成聊天记录；每一条都有明确的操作者和版本。</p></div>
+              </section>
+            </div>
+          </section>
+
+          <section id="handoff-view" class="view" hidden aria-labelledby="handoff-heading">
+            <div class="page-heading">
+              <div>
+                <p class="eyebrow">AUTOMATIC CONTEXT · MANUAL CLIENT</p>
+                <h1 id="handoff-heading">交接历史</h1>
+                <p>系统自动推断下一个客户端、唯一可用 Binding 和事件游标；不会发送、控制或代替原生客户端执行。</p>
+              </div>
+              <button id="prepare-selected-handoff" type="button" class="button" disabled>生成下一份交接包</button>
+            </div>
+            <div class="handoff-layout">
+              <section class="ledger-surface handoff-guide" aria-labelledby="handoff-guide-heading">
+                <p class="eyebrow">CURRENT CONTEXT</p>
+                <h2 id="handoff-guide-heading">当前任务</h2>
+                <p id="handoff-task-note" class="section-note">先从待我审查或协作活动中选择一个任务。</p>
+                <ol class="manual-steps">
+                  <li><strong>生成上下文</strong><span>固定生成 handoff.md、manifest.json、候选响应模板和 schema。</span></li>
+                  <li><strong>交给原生客户端</strong><span>在 Codex 或 CC-HAHA 自己的界面中执行，不由网页遥控。</span></li>
+                  <li><strong>代理回传候选</strong><span>代理使用本地 CLI 写入收件箱；失败候选会保留在协作活动中。</span></li>
+                  <li><strong>你做最终审核</strong><span>只有 REVIEW 状态下的批准完成或要求返工，才是你的正式判断。</span></li>
+                </ol>
+              </section>
+              <div class="secondary-forms">
+                <section class="ledger-surface handoff-history-surface" aria-labelledby="handoff-history-heading">
+                  <div class="ledger-heading"><div><h2 id="handoff-history-heading">已生成的交接包</h2><p>仅显示经过完整性校验的历史记录。</p></div></div>
+                  <div id="handoff-history-list" class="activity-list"></div>
+                  <div id="handoff-history-empty" class="empty-state"><h3>尚无交接包</h3><p>选择任务后，点击“生成下一份交接包”。</p></div>
+                </section>
+                <details class="advanced-details">
+                  <summary>高级：只读校验一份包外候选响应</summary>
+                  <form id="response-form" class="form-sheet">
+                    <label>交接包目录<input name="package" required></label>
+                    <label>候选 JSON 路径<input name="input" required></label>
+                    <p class="form-note">这项校验不会写入任务。日常代理协作请优先使用收件箱命令。</p>
+                    <button type="submit" class="button button-secondary">只读校验</button>
+                  </form>
+                </details>
+              </div>
+            </div>
+          </section>
+
+          <section id="setup-view" class="view" hidden aria-labelledby="setup-heading">
+            <div class="page-heading">
+              <div>
+                <p class="eyebrow">SETUP</p>
+                <h1 id="setup-heading">设置与登记</h1>
+                <p>添加一次项目目录，之后网页和 Agent 会自动使用全局协作中枢。</p>
+              </div>
+            </div>
+            <div class="setup-summary">
+              <section class="ledger-surface"><p class="eyebrow">CLIENTS</p><h2>已登记客户端</h2><ul id="client-list" class="definition-list"></ul></section>
+              <section class="ledger-surface"><p class="eyebrow">PROJECTS</p><h2>已登记项目</h2><ul id="project-list" class="definition-list"></ul></section>
+            </div>
+            <section class="setup-forms" aria-labelledby="setup-forms-heading">
+              <p class="eyebrow">ADD LOCAL PROJECT</p>
+              <h2 id="setup-forms-heading">添加本机项目</h2>
+              <form id="local-project-form" class="form-sheet local-project-form">
+                <label>项目目录<input name="path" required placeholder="D:\projects\my-project"></label>
+                <label>显示名称（可选）<input name="name" placeholder="不填则使用文件夹名称"></label>
+                <p class="form-note">项目 ID、设备、Binding 和全局存储会自动处理；不会复制或上传项目代码。</p>
+                <button type="submit" class="button">添加项目</button>
+              </form>
+            </section>
+          </section>
+
+          <section id="result-panel" class="result-panel" hidden aria-labelledby="output-heading">
+            <div class="result-heading">
+              <div><p class="eyebrow">LAST RESULT</p><h2 id="output-heading">操作结果</h2></div>
+              <button id="clear-output" type="button" class="button button-quiet">关闭结果</button>
+            </div>
+            <pre id="output">等待操作。</pre>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div id="write-dialog" class="dialog-backdrop" hidden>
+      <section class="dialog-sheet" role="dialog" aria-modal="true" aria-labelledby="write-dialog-title">
+        <div class="dialog-heading"><div><p class="eyebrow">FORMAL ACTION</p><h2 id="write-dialog-title">任务操作</h2></div><button id="close-write-dialog" type="button" class="button button-quiet">关闭</button></div>
+
+        <form id="state-action-form" class="modal-form" hidden>
+          <input name="task" data-task-field type="hidden">
+          <input name="action" type="hidden">
+          <p id="state-action-help" class="form-note"></p>
+          <label>操作人<input name="actor" data-actor-field readonly required></label>
+          <label id="feedback-field" hidden>返工反馈<input name="feedback" type="text"></label>
+          <label>expected version<input name="expectedVersion" data-version-field readonly required></label>
+          <button type="submit" class="button">继续确认</button>
+        </form>
+      </section>
+    </div>
+
+    <div id="confirm-dialog" class="dialog-backdrop" hidden>
+      <section class="dialog-sheet dialog-confirm" role="dialog" aria-modal="true" aria-labelledby="confirm-heading">
+        <p class="eyebrow">CONFIRM WRITE</p>
+        <h2 id="confirm-heading">确认正式写入</h2>
+        <p id="confirm-summary" class="confirm-summary"></p>
+        <div class="dialog-actions"><button id="cancel-confirm" type="button" class="button button-quiet">取消</button><button id="accept-confirm" type="button" class="button">确认写入</button></div>
+      </section>
+    </div>
+
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

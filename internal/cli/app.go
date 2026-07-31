@@ -6,20 +6,24 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/agentintake"
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/handoff"
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/store"
 )
 
 type App struct {
-	Root     string
-	Stdout   io.Writer
-	Stderr   io.Writer
-	Clock    func() time.Time
-	Registry store.RegistryStore
-	Bindings store.BindingStore
-	Journal  store.TaskJournal
-	Query    store.TaskQuery
-	Handoff  *handoff.Service
+	Root             string
+	WorkingDirectory string
+	Stdout           io.Writer
+	Stderr           io.Writer
+	Clock            func() time.Time
+	Config           AppConfig
+	Registry         store.RegistryStore
+	Bindings         store.BindingStore
+	Journal          store.TaskJournal
+	Query            store.TaskQuery
+	Handoff          *handoff.Service
+	Intake           *agentintake.Service
 }
 
 type AppConfig struct {
@@ -40,16 +44,20 @@ func NewAppWithConfig(root string, stdout, stderr io.Writer, clock func() time.T
 	journal := store.NewFileTaskJournal(dataRoot, store.FlockLocker{}, registry, evidence)
 	bindings := store.NewFileBindingStore(dataRoot, store.FlockLocker{}, registry)
 	query := store.NewFileTaskQuery(journal, registry)
+	intake := agentintake.NewService(registry, journal, query, agentintake.NewFileReceiptStore(root, store.FlockLocker{}), clock)
 	return &App{
-		Root:     root,
-		Stdout:   stdout,
-		Stderr:   stderr,
-		Clock:    clock,
-		Registry: registry,
-		Bindings: bindings,
-		Journal:  journal,
-		Query:    query,
-		Handoff:  handoff.NewService(query, bindings, store.NewFileBindingResolver(store.BindingResolverConfig{MaxHashFileSize: config.MaxHashFileSize}), registry, root),
+		Root:             root,
+		WorkingDirectory: root,
+		Stdout:           stdout,
+		Stderr:           stderr,
+		Clock:            clock,
+		Config:           config,
+		Registry:         registry,
+		Bindings:         bindings,
+		Journal:          journal,
+		Query:            query,
+		Handoff:          handoff.NewService(query, bindings, store.NewFileBindingResolver(store.BindingResolverConfig{MaxHashFileSize: config.MaxHashFileSize}), registry, root),
+		Intake:           intake,
 	}
 }
 

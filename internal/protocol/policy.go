@@ -1,6 +1,11 @@
 package protocol
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+var ErrHumanFinalReviewRequired = errors.New("human final review is required")
 
 // ActionPolicy is the single source of actor, role, capability, and status
 // authorization for Journal, Replay, queries, and handoff generation.
@@ -10,6 +15,46 @@ type ActionPolicy interface {
 }
 
 type DefaultActionPolicy struct{}
+
+func AuthorizeAgentAction(policy CollaborationPolicy, action Action) error {
+	if _, err := AgentPolicyDecision(policy); err != nil {
+		return err
+	}
+	if policy.FinalReview == FinalReviewHuman && (action == Approve || action == RequestChanges) {
+		return ErrHumanFinalReviewRequired
+	}
+	if action == Approve && !policy.AutoDone {
+		return errors.New("automatic DONE is disabled")
+	}
+	return nil
+}
+
+func AgentPolicyDecision(policy CollaborationPolicy) (string, error) {
+	if err := policy.Validate(); err != nil {
+		return "", err
+	}
+	if policy.SubmissionMode != SubmissionModeAgentAuto {
+		return "", errors.New("agent automatic submission is disabled")
+	}
+	switch policy.FinalReview {
+	case FinalReviewHuman:
+		return PolicyDecisionAgentAutoHumanFinal, nil
+	case FinalReviewAgent:
+		return PolicyDecisionAgentAutoAgentFinal, nil
+	default:
+		return "", errors.New("agent final review mode is invalid")
+	}
+}
+
+func HumanPolicyDecision(policy CollaborationPolicy, action Action) (string, error) {
+	if err := policy.Validate(); err != nil {
+		return "", err
+	}
+	if policy.FinalReview == FinalReviewHuman && (action == Approve || action == RequestChanges) {
+		return PolicyDecisionHumanFinal, nil
+	}
+	return PolicyDecisionHumanOperator, nil
+}
 
 func (DefaultActionPolicy) AllowedActions(task Task, state State, actor string, refs References) []Action {
 	actions := make([]Action, 0, len(allActions))

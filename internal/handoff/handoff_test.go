@@ -399,6 +399,63 @@ func TestResponseValidationIsReadOnlyAndChecksPackageIdentity(t *testing.T) {
 	}
 }
 
+func TestExportNextInfersContextAndUsesPerTargetHistoryCursor(t *testing.T) {
+	fixture := newWorkingHandoffFixture(t)
+	first, err := fixture.service.ExportNext(context.Background(), "T-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Reused || first.Adapter != "manual-cc-haha" || first.TargetClient != "cc-haha" || first.FromEventExclusive != 0 || !strings.HasPrefix(first.OutputDir, "collaboration/.runtime/handoffs/T-0001/cc-haha/") {
+		t.Fatalf("first automatic handoff = %+v", first)
+	}
+	firstPath, err := resolveRuntimeHandoffPath(fixture.service.WorkspaceRoot, first.OutputDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyPackage(firstPath); err != nil {
+		t.Fatal(err)
+	}
+	reused, err := fixture.service.ExportNext(context.Background(), "T-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reused.Reused || reused.OutputDir != first.OutputDir || reused.PackageID != first.PackageID {
+		t.Fatalf("reused automatic handoff = %+v", reused)
+	}
+	if _, err := fixture.journal.AppendMessage(context.Background(), "T-0001", 5, "cc-haha", "Progress update", handoffTime); err != nil {
+		t.Fatal(err)
+	}
+	second, err := fixture.service.ExportNext(context.Background(), "T-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Reused || second.FromEventExclusive != first.ThroughEvent || second.ThroughEvent != 6 || second.TargetClient != "cc-haha" {
+		t.Fatalf("second automatic handoff = %+v", second)
+	}
+	history, err := fixture.service.ListHistory(context.Background(), "T-0001")
+	if err != nil || len(history) != 2 || !history[0].Valid || !history[1].Valid {
+		t.Fatalf("handoff history = %+v, %v", history, err)
+	}
+}
+
+func TestExportNextRejectsTamperedPriorHistoryPackage(t *testing.T) {
+	fixture := newWorkingHandoffFixture(t)
+	first, err := fixture.service.ExportNext(context.Background(), "T-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := resolveRuntimeHandoffPath(fixture.service.WorkspaceRoot, first.OutputDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "handoff.md"), []byte("tampered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.ExportNext(context.Background(), "T-0001"); err == nil {
+		t.Fatal("tampered history package was accepted as a cursor")
+	}
+}
+
 func readTaskFiles(t *testing.T, root string) map[string][]byte {
 	t.Helper()
 	files := map[string][]byte{}

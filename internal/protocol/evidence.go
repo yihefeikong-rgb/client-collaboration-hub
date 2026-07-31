@@ -21,11 +21,14 @@ type Evidence struct {
 }
 
 type TransitionIntent struct {
-	Action       Action
-	Actor        string
-	NextAssignee string
-	Feedback     string
-	At           time.Time
+	Action         Action
+	Actor          string
+	NextAssignee   string
+	Feedback       string
+	At             time.Time
+	Origin         EventOrigin
+	SubmissionID   string
+	PolicyDecision string
 }
 
 func (e Evidence) Validate(expectedID string) error {

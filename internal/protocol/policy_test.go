@@ -1,10 +1,37 @@
 package protocol
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
 )
+
+func TestAuthorizeAgentActionRespectsHumanFinalPolicy(t *testing.T) {
+	policy := DefaultCollaborationPolicy()
+	for _, action := range []Action{Assign, Accept, Submit, Resume, Block, Message, AddEvidence} {
+		if err := AuthorizeAgentAction(policy, action); err != nil {
+			t.Fatalf("action %s rejected: %v", action, err)
+		}
+	}
+	for _, action := range []Action{Approve, RequestChanges} {
+		if err := AuthorizeAgentAction(policy, action); !errors.Is(err, ErrHumanFinalReviewRequired) {
+			t.Fatalf("action %s error = %v", action, err)
+		}
+	}
+}
+
+func TestHumanPolicyDecisionMarksHumanFinalReview(t *testing.T) {
+	policy := DefaultCollaborationPolicy()
+	decision, err := HumanPolicyDecision(policy, Approve)
+	if err != nil || decision != PolicyDecisionHumanFinal {
+		t.Fatalf("approve decision = %q, %v", decision, err)
+	}
+	decision, err = HumanPolicyDecision(policy, Assign)
+	if err != nil || decision != PolicyDecisionHumanOperator {
+		t.Fatalf("assign decision = %q, %v", decision, err)
+	}
+}
 
 type policyReferences struct {
 	capabilities map[string]map[string]bool

@@ -66,6 +66,33 @@ func TestRegistryDoesNotPublishShortWrite(t *testing.T) {
 	}
 }
 
+func TestRegistryUpdateProjectPolicyAppendsAuditedEntry(t *testing.T) {
+	root := t.TempDir()
+	registry := NewFileRegistryStore(root, FlockLocker{})
+	if err := registry.CreateProject(context.Background(), protocol.Project{ID: "project-1", Name: "Demo", CreatedAt: journalTime}); err != nil {
+		t.Fatal(err)
+	}
+	next := protocol.CollaborationPolicy{
+		SubmissionMode: protocol.SubmissionModeAgentAuto,
+		FinalReview:    protocol.FinalReviewAgent,
+		AutoDone:       true,
+	}
+	project, err := registry.UpdateProjectPolicy(context.Background(), "project-1", 1, "operator", next, journalTime.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.PolicyVersion != 2 || len(project.PolicyHistory) != 1 {
+		t.Fatalf("project = %#v", project)
+	}
+	audit := project.PolicyHistory[0]
+	if audit.Previous != protocol.DefaultCollaborationPolicy() || audit.Current != next || audit.Actor != "operator" || audit.Origin != protocol.EventOriginHuman {
+		t.Fatalf("audit = %#v", audit)
+	}
+	if _, err := registry.UpdateProjectPolicy(context.Background(), "project-1", 1, "operator", next, journalTime.Add(2*time.Second)); !errors.Is(err, ErrPolicyVersionConflict) {
+		t.Fatalf("stale policy version error = %v", err)
+	}
+}
+
 func TestCreateTaskRequiresRegisteredReferences(t *testing.T) {
 	root := t.TempDir()
 	registry := NewFileRegistryStore(root, FlockLocker{})

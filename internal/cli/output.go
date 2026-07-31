@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/agentintake"
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/handoff"
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/protocol"
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/store"
@@ -66,12 +67,38 @@ type handoffOutput struct {
 	PackageID    string `json:"package_id"`
 }
 
+type handoffNextOutput struct {
+	Adapter            string `json:"adapter"`
+	TargetClient       string `json:"target_client"`
+	TaskID             string `json:"task_id"`
+	ProjectID          string `json:"project_id"`
+	FromEventExclusive int64  `json:"from_event_exclusive"`
+	ThroughEvent       int64  `json:"through_event"`
+	PackageID          string `json:"package_id"`
+	OutputDir          string `json:"output_dir"`
+	Reused             bool   `json:"reused"`
+}
+
 type responseValidationOutput struct {
 	PackageID      string                `json:"package_id"`
 	TaskID         string                `json:"task_id"`
 	ActionActor    string                `json:"action_actor"`
 	ProposedAction string                `json:"proposed_action"`
 	Steps          []handoff.CommandStep `json:"steps"`
+}
+
+type agentSubmissionOutput struct {
+	ReceiptID       string                     `json:"receipt_id"`
+	Kind            agentintake.SubmissionKind `json:"kind"`
+	Status          agentintake.ReceiptStatus  `json:"status"`
+	SourceClientID  string                     `json:"source_client_id,omitempty"`
+	TaskID          string                     `json:"task_id,omitempty"`
+	PackageID       string                     `json:"package_id,omitempty"`
+	Reason          string                     `json:"reason,omitempty"`
+	ObservedVersion int64                      `json:"observed_version,omitempty"`
+	CurrentVersion  int64                      `json:"current_version,omitempty"`
+	AppliedEventIDs []int64                    `json:"applied_event_ids"`
+	State           *stateOutput               `json:"state,omitempty"`
 }
 
 func stateResult(state protocol.State) stateOutput {
@@ -176,6 +203,15 @@ func (a *App) writeHandoff(jsonOutput bool, report handoff.ExportReport) {
 	fmt.Fprintf(a.Stdout, "adapter: %s\ntarget_client: %s\ntask_id: %s\nproject_id: %s\nthrough_event: %d\npackage_id: %s\n", result.Adapter, result.TargetClient, result.TaskID, result.ProjectID, result.ThroughEvent, result.PackageID)
 }
 
+func (a *App) writeHandoffNext(jsonOutput bool, report handoff.NextExportReport) {
+	output := handoffNextOutput{Adapter: report.Adapter, TargetClient: report.TargetClient, TaskID: report.TaskID, ProjectID: report.ProjectID, FromEventExclusive: report.FromEventExclusive, ThroughEvent: report.ThroughEvent, PackageID: report.PackageID, OutputDir: report.OutputDir, Reused: report.Reused}
+	if jsonOutput {
+		a.writeJSON(output)
+		return
+	}
+	fmt.Fprintf(a.Stdout, "adapter: %s\ntarget_client: %s\ntask_id: %s\nproject_id: %s\nfrom_event_exclusive: %d\nthrough_event: %d\npackage_id: %s\noutput_dir: %s\nreused: %t\n", output.Adapter, output.TargetClient, output.TaskID, output.ProjectID, output.FromEventExclusive, output.ThroughEvent, output.PackageID, output.OutputDir, output.Reused)
+}
+
 func (a *App) writeResponseValidation(jsonOutput bool, result handoff.ResponseValidation) {
 	output := responseValidationOutput{PackageID: result.Manifest.PackageID, TaskID: result.Manifest.TaskID, ActionActor: result.Manifest.ActionActor, ProposedAction: string(result.Response.ProposedAction), Steps: result.Steps}
 	if jsonOutput {
@@ -185,6 +221,40 @@ func (a *App) writeResponseValidation(jsonOutput bool, result handoff.ResponseVa
 	fmt.Fprintf(a.Stdout, "package_id: %s\ntask_id: %s\naction_actor: %s\nproposed_action: %s\n仅供人工审核，不会自动执行：\n", output.PackageID, output.TaskID, output.ActionActor, output.ProposedAction)
 	for index, step := range output.Steps {
 		fmt.Fprintf(a.Stdout, "%d. %s\n", index+1, formatCommandStep(step))
+	}
+}
+
+func (a *App) writeAgentSubmission(jsonOutput bool, result agentintake.Result) {
+	receipt := result.Receipt
+	output := agentSubmissionOutput{
+		ReceiptID:       receipt.ID,
+		Kind:            receipt.Kind,
+		Status:          receipt.Status,
+		SourceClientID:  receipt.SourceClientID,
+		TaskID:          receipt.TaskID,
+		PackageID:       receipt.PackageID,
+		Reason:          receipt.Reason,
+		ObservedVersion: receipt.ObservedVersion,
+		CurrentVersion:  receipt.CurrentVersion,
+		AppliedEventIDs: append([]int64(nil), receipt.AppliedEventIDs...),
+	}
+	if result.State.TaskID != "" {
+		state := stateResult(result.State)
+		output.State = &state
+	}
+	if jsonOutput {
+		a.writeJSON(output)
+		return
+	}
+	fmt.Fprintf(a.Stdout, "receipt_id: %s\nkind: %s\nstatus: %s\n", output.ReceiptID, output.Kind, output.Status)
+	if output.TaskID != "" {
+		fmt.Fprintf(a.Stdout, "task_id: %s\n", output.TaskID)
+	}
+	if output.Reason != "" {
+		fmt.Fprintf(a.Stdout, "reason: %s\n", output.Reason)
+	}
+	if output.State != nil {
+		a.writeState(false, result.State)
 	}
 }
 

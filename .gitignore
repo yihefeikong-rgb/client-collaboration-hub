@@ -1,4 +1,7 @@
-collaboration/.runtime/
-collaboration/bindings/
+collaboration/
 collab.exe
 .worktrees/
+*.log
+*.bak
+*.fixbak
+*.exe~
