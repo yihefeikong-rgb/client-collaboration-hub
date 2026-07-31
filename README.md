@@ -77,6 +77,18 @@ claude mcp add --scope user client-collaboration-hub -- "D:\path\to\collab.exe" 
 
 分配后 CC-HAHA 通过 MCP 的 `collab_get_next_work` 看到任务，`collab_generate_handoff` 生成交接包，执行完成后 `collab_submit_candidate` 提交。Codex 在网页控制台批准完成或要求返工。
 
+### 6. 启动唤醒服务（可选）
+
+`collab watch` 会持续监视任务状态，并在任务需要推进时自动唤醒负责的 AI 客户端（CC-HAHA 或 Codex），方便电脑重启后快速恢复无人值守协作。
+
+一键后台启动：
+
+```powershell
+.\scripts\start-watch.ps1 -Root "D:\path\to\project"
+```
+
+或直接双击 `启动自动唤醒.cmd`。脚本会后台启动 `collab.exe watch`，输出 watch 进程 PID 和日志文件路径（位于项目 `logs\` 目录）；若 watch 已在运行则提示后直接退出，不会重复启动。
+
 ## 数据位置
 
 默认全局数据目录：

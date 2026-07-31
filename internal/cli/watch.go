@@ -67,6 +67,7 @@ type wakeNotifier struct {
 	dryRun       bool
 	ccCommand    string
 	codexCommand string
+	taskTimeout  time.Duration
 	statePath    string
 
 	mu       sync.Mutex
@@ -81,6 +82,7 @@ func (a *App) watch(ctx context.Context, args []string, jsonOutput bool) (int, e
 	once := fs.Bool("once", false, "")
 	ccCommand := fs.String("cc-command", "claude", "")
 	codexCommand := fs.String("codex-command", "codex", "")
+	taskTimeout := fs.Duration("task-timeout", 30*time.Minute, "")
 	if err := parse(fs, args); err != nil {
 		return ExitValidation, err
 	}
@@ -90,6 +92,7 @@ func (a *App) watch(ctx context.Context, args []string, jsonOutput bool) (int, e
 		dryRun:       *dryRun,
 		ccCommand:    *ccCommand,
 		codexCommand: *codexCommand,
+		taskTimeout:  *taskTimeout,
 		statePath:    filepath.Join(a.Root, "collaboration", ".runtime", wakeStateFileName),
 		notified:     map[string]bool{},
 		running:      map[string]bool{},
@@ -170,6 +173,7 @@ func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.
 		n.mu.Lock()
 		delete(n.running, rule.Client)
 		n.mu.Unlock()
+		n.allowRetryIfUnchanged(ctx, snapshot, rule)
 	}()
 	command, args := n.ccCommand, []string{"-p"}
 	if rule.Client == "codex" {
@@ -182,6 +186,12 @@ func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.
 		}
 	}
 	prompt := rule.Prompt + "\n任务：" + snapshot.Task.ID
+	if rule.Client == "cc-haha" {
+		if err := n.wakeCCHaha(ctx, snapshot, prompt); err != nil {
+			fmt.Fprintf(n.app.Stderr, "[watch] %s: CC-HAHA wake failed for %s: %v\n", time.Now().UTC().Format(time.RFC3339), snapshot.Task.ID, err)
+		}
+		return
+	}
 	cmd := exec.Command(command, append(args, prompt)...)
 	cmd.Dir = workDir
 	cmd.Stdout = n.app.Stdout
@@ -199,6 +209,27 @@ func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.
 		return
 	}
 	fmt.Fprintf(n.app.Stdout, "[watch] %s: %s finished %s\n", time.Now().UTC().Format(time.RFC3339), rule.Client, snapshot.Task.ID)
+}
+
+// allowRetryIfUnchanged removes the notified marker when the task is still in
+// the same state after a wake attempt, so a later scan can try again. If the
+// task moved forward, the marker stays and the new state drives the next wake.
+func (n *wakeNotifier) allowRetryIfUnchanged(ctx context.Context, snapshot store.TaskSnapshot, rule *wakeRule) {
+	current, err := n.app.Query.Snapshot(ctx, snapshot.Task.ID, 0)
+	if err != nil {
+		return
+	}
+	if current.State.Status != snapshot.State.Status || current.State.Version != snapshot.State.Version {
+		return
+	}
+	if wakeRuleFor(current.State.Status, current.State.ResponsibleClient) == nil {
+		return
+	}
+	key := fmt.Sprintf("%s|%s|%d", snapshot.Task.ID, current.State.Status, current.State.Version)
+	n.mu.Lock()
+	delete(n.notified, key)
+	n.mu.Unlock()
+	fmt.Fprintf(n.app.Stdout, "[watch] %s: %s did not advance %s; will retry\n", time.Now().UTC().Format(time.RFC3339), rule.Client, snapshot.Task.ID)
 }
 
 func (n *wakeNotifier) markNotified(key string) {
