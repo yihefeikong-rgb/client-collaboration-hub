@@ -5,7 +5,27 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path -LiteralPath $Root).Path
-$executable = Join-Path $Root 'collab.exe'
+
+function Find-CollabExecutable {
+    $local = Join-Path $Root 'collab.exe'
+    if (Test-Path -LiteralPath $local -PathType Leaf) {
+        return (Resolve-Path -LiteralPath $local).Path
+    }
+    $globalDir = Join-Path $env:LOCALAPPDATA 'Programs\client-collaboration-hub'
+    $global = Join-Path $globalDir 'collab.exe'
+    if (Test-Path -LiteralPath $global -PathType Leaf) {
+        return (Resolve-Path -LiteralPath $global).Path
+    }
+    foreach ($candidate in @(Get-Command collab.exe -ErrorAction SilentlyContinue)) {
+        return $candidate.Source
+    }
+    throw "未找到 collab 程序：$local（可将 collab.exe 放到本目录，或运行 scripts\install-global.ps1 全局安装）"
+}
+
+$executable = Find-CollabExecutable
+
+# 校验 pid 文件/进程检查使用真实 exe 路径，避免同目录 symlink 干扰。
+$executable = (Resolve-Path -LiteralPath $executable).Path
 
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw "未找到 collab 程序：$executable"

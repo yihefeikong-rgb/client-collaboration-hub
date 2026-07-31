@@ -85,13 +85,27 @@ func TestServerReadsAndRunsOnlyKnownCommands(t *testing.T) {
 		t.Fatalf("args=%v want=%v", runner.args[0], want)
 	}
 
+	response = postJSON(t, httpServer.URL+"/api/v1/tasks/T-0001/actions/message", httpServer.URL, session["csrf_token"], taskActionRequest{Actor: "codex", Feedback: "补充说明", ExpectedVersion: 5})
+	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
+		t.Fatalf("message action status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	if len(runner.args) != 2 {
+		t.Fatalf("runner calls=%v", runner.args)
+	}
+	messageWant := []string{"message", "add", "--task", "T-0001", "--actor", "codex", "--body", "补充说明", "--expected-version", "5"}
+	if !reflect.DeepEqual(runner.args[1], messageWant) {
+		t.Fatalf("message args=%v want=%v", runner.args[1], messageWant)
+	}
+
 	response = postJSON(t, httpServer.URL+"/api/v1/tasks/T-0001/actions/submit", httpServer.URL, session["csrf_token"], taskActionRequest{Actor: "cc-haha", ExpectedVersion: 4})
 	if response.StatusCode != http.StatusNotFound {
 		response.Body.Close()
 		t.Fatalf("agent action status=%d", response.StatusCode)
 	}
 	response.Body.Close()
-	if len(runner.args) != 1 {
+	if len(runner.args) != 2 {
 		t.Fatalf("agent action unexpectedly ran=%v", runner.args)
 	}
 
@@ -115,7 +129,7 @@ func TestServerReadsAndRunsOnlyKnownCommands(t *testing.T) {
 		t.Fatalf("handoff next status=%d", response.StatusCode)
 	}
 	response.Body.Close()
-	if len(runner.args) != 2 || !reflect.DeepEqual(runner.args[1], []string{"handoff", "next", "--task", "T-0001"}) {
+	if len(runner.args) != 3 || !reflect.DeepEqual(runner.args[2], []string{"handoff", "next", "--task", "T-0001"}) {
 		t.Fatalf("handoff next args=%v", runner.args)
 	}
 
@@ -125,7 +139,7 @@ func TestServerReadsAndRunsOnlyKnownCommands(t *testing.T) {
 		t.Fatalf("local project status=%d", response.StatusCode)
 	}
 	response.Body.Close()
-	if len(runner.args) != 3 || !reflect.DeepEqual(runner.args[2], []string{"project", "register-local", "--path", `D:\projects\example`, "--name", "Example"}) {
+	if len(runner.args) != 4 || !reflect.DeepEqual(runner.args[3], []string{"project", "register-local", "--path", `D:\projects\example`, "--name", "Example"}) {
 		t.Fatalf("local project args=%v", runner.args)
 	}
 

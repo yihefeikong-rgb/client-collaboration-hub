@@ -16,6 +16,7 @@
   const ACTION_LABELS = {
     request_changes: "要求返工",
     approve: "批准完成",
+    message: "发送补充消息",
   };
 
   const ACTION_PRIORITY = ["approve", "request_changes"];
@@ -134,6 +135,7 @@
     const descriptions = {
       request_changes: "以结构化反馈要求执行者返工。",
       approve: "形成不可逆的完成审查结论。",
+      message: "向当前负责客户端发送一条补充消息；不改变任务状态，watch 会自动唤醒同一会话。",
     };
     return descriptions[action] || "执行此操作。";
   }
@@ -525,13 +527,18 @@
     const form = byID("state-action-form");
     form.elements.namedItem("action").value = action;
     byID("state-action-help").textContent = actionDescription(action);
-    byID("feedback-field").hidden = action !== "request_changes";
+    const feedbackField = byID("feedback-field");
+    const isMessage = action === "message";
+    feedbackField.hidden = action !== "request_changes" && !isMessage;
+    byID("feedback-label").textContent = isMessage ? "补充消息" : "返工反馈";
+    const feedbackInput = feedbackField.querySelector("input[name=feedback]");
+    feedbackInput.placeholder = isMessage ? "例如：注意目录权限，完成后直接提交" : "";
     openWriteDialog("state-action-form", ACTION_LABELS[action] || "任务操作");
   }
 
   function renderActions(view) {
     const step = nextStep(view.state);
-    const allowed = [...view.allowed_actions].filter((action) => action === "approve" || action === "request_changes").sort((left, right) => ACTION_PRIORITY.indexOf(left) - ACTION_PRIORITY.indexOf(right));
+    const allowed = [...view.allowed_actions].filter((action) => action === "approve" || action === "request_changes" || action === "message").sort((left, right) => ACTION_PRIORITY.indexOf(left) - ACTION_PRIORITY.indexOf(right));
     setText("next-action-title", step.title);
     setText("next-action-description", step.description);
     const binding = byID("binding-status");
@@ -730,7 +737,7 @@
       return;
     }
     const detail = [`任务：${task}`, `操作身份：${clientName(actor)}`, `expected version：${version}`];
-    if (action === "request_changes") detail.push(`反馈：${feedback || "（未填写）"}`);
+    if (action === "request_changes" || action === "message") detail.push(`内容：${feedback || "（未填写）"}`);
     closeWriteDialog();
     confirmWrite(ACTION_LABELS[action] || "任务操作", confirmationSummary(ACTION_LABELS[action] || action, detail), `/api/v1/tasks/${encodeURIComponent(task)}/actions/${encodeURIComponent(action)}`, {
       actor, feedback, expected_version: version,

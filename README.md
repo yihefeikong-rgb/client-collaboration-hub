@@ -81,6 +81,8 @@ claude mcp add --scope user client-collaboration-hub -- "D:\path\to\collab.exe" 
 
 `collab watch` 会持续监视任务状态，并在任务需要推进时自动唤醒负责的 AI 客户端（CC-HAHA 或 Codex），方便电脑重启后快速恢复无人值守协作。
 
+唤醒采用“一个任务固定一个 CC-HAHA 会话”的机制：首次唤醒时用确定性会话 ID 创建会话，之后的返工或补充消息都会恢复同一个会话继续对话，不会每次重新开一个空白上下文。在网页控制台给任务发送补充消息后，watch 会自动唤醒负责客户端并把消息带进同一会话；唤醒失败会自动退避重试（默认 60 秒）。
+
 一键后台启动：
 
 ```powershell
@@ -88,6 +90,14 @@ claude mcp add --scope user client-collaboration-hub -- "D:\path\to\collab.exe" 
 ```
 
 或直接双击 `启动自动唤醒.cmd`。脚本会后台启动 `collab.exe watch`，输出 watch 进程 PID 和日志文件路径（位于项目 `logs\` 目录）；若 watch 已在运行则提示后直接退出，不会重复启动。
+
+脚本优先使用项目目录下的 `collab.exe`，找不到时会回退到全局安装目录或 PATH。想让任何项目文件夹都能使用，可执行：
+
+```powershell
+.\scripts\install-global.ps1
+```
+
+该脚本把 `collab.exe` 复制到 `%LOCALAPPDATA%\Programs\client-collaboration-hub\` 并加入用户 PATH；数据仍在全局目录，客户端会话始终在各自项目的 Binding 目录中创建。
 
 ## 数据位置
 

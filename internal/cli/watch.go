@@ -2,14 +2,17 @@ package cli
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -24,9 +27,11 @@ const (
 )
 
 const (
-	ccExecutionPrompt = `协作中枢给你分配了任务。请读取 collab://manual/agent-operating-guide 资源，然后调用 collab_get_next_work（client_id 用 cc-haha）找到你的任务，再调用 collab_get_task 读取任务详情和验收标准。按操作指南自主完成：认领任务、生成交接包、实施、运行真实测试、填写候选响应并调用 collab_submit_candidate 提交。完成后简要报告结果。`
-	ccRevisionPrompt  = `协作中枢有任务需要返工。请读取 collab://manual/agent-operating-guide 资源，调用 collab_get_next_work（client_id 用 cc-haha）找到返工任务，读取 REVIEW 反馈和返工要求。按指南重新生成交接包、实施返工并提交候选响应。完成后简要报告结果。`
-	codexReviewPrompt = `协作中枢有任务进入 REVIEW 需要你审查。请读取 collab://manual/agent-operating-guide 资源，然后调用 collab_get_next_work（client_id 用 codex）找到待审查任务，读取任务详情和 Evidence。按项目终审模式提交审查候选：生成交接包、填写候选响应（request_changes 或 approve）、调用 collab_submit_candidate 提交。完成后报告审查结论。`
+	ccExecutionPrompt  = `协作中枢给你分配了任务。请读取 collab://manual/agent-operating-guide 资源，然后调用 collab_get_next_work（client_id 用 cc-haha）找到你的任务，再调用 collab_get_task 读取任务详情和验收标准。按操作指南自主完成：认领任务、生成交接包、实施、运行真实测试、填写候选响应并调用 collab_submit_candidate 提交。完成后简要报告结果。`
+	ccRevisionPrompt   = `协作中枢有任务需要返工。请读取 collab://manual/agent-operating-guide 资源，调用 collab_get_next_work（client_id 用 cc-haha）找到返工任务，读取 REVIEW 反馈和返工要求。按指南重新生成交接包、实施返工并提交候选响应。完成后简要报告结果。`
+	codexReviewPrompt  = `协作中枢有任务进入 REVIEW 需要你审查。请读取 collab://manual/agent-operating-guide 资源，然后调用 collab_get_next_work（client_id 用 codex）找到待审查任务，读取任务详情和 Evidence。按项目终审模式提交审查候选：生成交接包、填写候选响应（request_changes 或 approve）、调用 collab_submit_candidate 提交。完成后报告审查结论。`
+	ccMessagePrompt    = `协作中枢有新的补充消息，需要你继续处理当前任务。请读取 collab://manual/agent-operating-guide 资源，调用 collab_get_next_work（client_id 用 cc-haha）找到你的任务，再调用 collab_get_task 读取任务详情、最新事件和补充消息。结合新信息继续执行：认领任务、生成交接包、实施、运行真实测试、填写候选响应并调用 collab_submit_candidate 提交。完成后简要报告结果。`
+	codexMessagePrompt = `协作中枢有新的补充消息需要你关注。请读取 collab://manual/agent-operating-guide 资源，调用 collab_get_next_work（client_id 用 codex）找到待审查任务，再调用 collab_get_task 读取任务详情、Evidence 和补充消息。结合新信息继续审查，并按项目终审模式提交审查候选。完成后报告结论。`
 )
 
 // wakeRule maps a task state to the client that should be woken up.
@@ -53,6 +58,24 @@ func wakeRuleFor(status protocol.Status, responsible string) *wakeRule {
 	return nil
 }
 
+// messageWakeRuleFor returns the client that should be woken when the latest
+// event is a supplemental message for the responsible client. Done and
+// blocked tasks never get woken for messages.
+func messageWakeRuleFor(status protocol.Status, responsible string) *wakeRule {
+	switch status {
+	case protocol.Assigned, protocol.Working, protocol.RevisionRequired, protocol.Review:
+	default:
+		return nil
+	}
+	switch responsible {
+	case "cc-haha":
+		return &wakeRule{Client: "cc-haha", Prompt: ccMessagePrompt}
+	case "codex":
+		return &wakeRule{Client: "codex", Prompt: codexMessagePrompt}
+	}
+	return nil
+}
+
 type wakeState struct {
 	Notified map[string]bool `json:"notified"`
 }
@@ -68,11 +91,13 @@ type wakeNotifier struct {
 	ccCommand    string
 	codexCommand string
 	taskTimeout  time.Duration
+	retryDelay   time.Duration
 	statePath    string
 
-	mu       sync.Mutex
-	notified map[string]bool
-	running  map[string]bool
+	mu         sync.Mutex
+	notified   map[string]bool
+	running    map[string]bool
+	retryAfter map[string]time.Time
 }
 
 func (a *App) watch(ctx context.Context, args []string, jsonOutput bool) (int, error) {
@@ -83,6 +108,7 @@ func (a *App) watch(ctx context.Context, args []string, jsonOutput bool) (int, e
 	ccCommand := fs.String("cc-command", "claude", "")
 	codexCommand := fs.String("codex-command", "codex", "")
 	taskTimeout := fs.Duration("task-timeout", 30*time.Minute, "")
+	retryDelay := fs.Duration("retry-delay", 60*time.Second, "")
 	if err := parse(fs, args); err != nil {
 		return ExitValidation, err
 	}
@@ -93,9 +119,11 @@ func (a *App) watch(ctx context.Context, args []string, jsonOutput bool) (int, e
 		ccCommand:    *ccCommand,
 		codexCommand: *codexCommand,
 		taskTimeout:  *taskTimeout,
+		retryDelay:   *retryDelay,
 		statePath:    filepath.Join(a.Root, "collaboration", ".runtime", wakeStateFileName),
 		notified:     map[string]bool{},
 		running:      map[string]bool{},
+		retryAfter:   map[string]time.Time{},
 	}
 	if err := notifier.load(); err != nil {
 		return exitCode(err), err
@@ -141,8 +169,12 @@ func (n *wakeNotifier) scan(ctx context.Context) {
 			n.mu.Unlock()
 			continue
 		}
+		if until, exists := n.retryAfter[key]; exists && n.app.Clock().Before(until) {
+			n.mu.Unlock()
+			continue
+		}
 		n.mu.Unlock()
-		rule := wakeRuleFor(snapshot.State.Status, snapshot.State.ResponsibleClient)
+		rule, prompt := wakeRuleAndPrompt(snapshot)
 		if rule == nil {
 			n.markNotified(key)
 			continue
@@ -163,12 +195,35 @@ func (n *wakeNotifier) scan(ctx context.Context) {
 			n.mu.Unlock()
 			continue
 		}
-		go n.wake(ctx, rule, snapshot)
+		go n.wake(ctx, rule, snapshot, prompt)
 	}
 	n.save()
 }
 
-func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.TaskSnapshot) {
+// wakeRuleAndPrompt decides whether a snapshot needs a wake and what prompt
+// to send. A supplemental message for the responsible client re-wakes the
+// same client with the message body attached; the task keeps its dedicated
+// session, so the follow-up continues the same conversation.
+func wakeRuleAndPrompt(snapshot store.TaskSnapshot) (*wakeRule, string) {
+	rule := wakeRuleFor(snapshot.State.Status, snapshot.State.ResponsibleClient)
+	supplement := ""
+	if last := lastEvent(snapshot.Events); last != nil && last.Type == protocol.EventMessageAdded && last.Actor != snapshot.State.ResponsibleClient {
+		if rule == nil {
+			rule = messageWakeRuleFor(snapshot.State.Status, snapshot.State.ResponsibleClient)
+		}
+		supplement = strings.TrimSpace(last.Body)
+	}
+	if rule == nil {
+		return nil, ""
+	}
+	prompt := rule.Prompt + "\n任务：" + snapshot.Task.ID
+	if supplement != "" {
+		prompt += "\n\n补充消息：" + supplement
+	}
+	return rule, prompt
+}
+
+func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.TaskSnapshot, prompt string) {
 	defer func() {
 		n.mu.Lock()
 		delete(n.running, rule.Client)
@@ -185,7 +240,6 @@ func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.
 			workDir = binding.LocalPath
 		}
 	}
-	prompt := rule.Prompt + "\n任务：" + snapshot.Task.ID
 	if rule.Client == "cc-haha" {
 		if err := n.wakeCCHaha(ctx, snapshot, prompt); err != nil {
 			fmt.Fprintf(n.app.Stderr, "[watch] %s: CC-HAHA wake failed for %s: %v\n", time.Now().UTC().Format(time.RFC3339), snapshot.Task.ID, err)
@@ -211,6 +265,31 @@ func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.
 	fmt.Fprintf(n.app.Stdout, "[watch] %s: %s finished %s\n", time.Now().UTC().Format(time.RFC3339), rule.Client, snapshot.Task.ID)
 }
 
+func lastEvent(events []protocol.Event) *protocol.Event {
+	if len(events) == 0 {
+		return nil
+	}
+	return &events[len(events)-1]
+}
+
+// ccSessionNamespace is the UUIDv5 namespace used to derive a stable CC-HAHA
+// session ID from a collaboration task ID. One task always maps to the same
+// session so follow-up messages resume the same conversation.
+var ccSessionNamespace = [16]byte{0x8a, 0x9b, 0x2c, 0x3d, 0x4e, 0x5f, 0x4a, 0x6b, 0x8c, 0x7d, 0x9e, 0x0f, 0x1a, 0x2b, 0x3c, 0x4d}
+
+// ccSessionUUID derives a deterministic UUIDv5 for a task. It matches the
+// session ID used for --session-id (first wake) and --resume (later wakes).
+func ccSessionUUID(taskID string) string {
+	hash := sha1.New()
+	_, _ = io.WriteString(hash, string(ccSessionNamespace[:]))
+	_, _ = io.WriteString(hash, taskID)
+	sum := hash.Sum(nil)
+	sum[6] = (sum[6] & 0x0f) | 0x50
+	sum[8] = (sum[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
+}
+
 // allowRetryIfUnchanged removes the notified marker when the task is still in
 // the same state after a wake attempt, so a later scan can try again. If the
 // task moved forward, the marker stays and the new state drives the next wake.
@@ -228,8 +307,9 @@ func (n *wakeNotifier) allowRetryIfUnchanged(ctx context.Context, snapshot store
 	key := fmt.Sprintf("%s|%s|%d", snapshot.Task.ID, current.State.Status, current.State.Version)
 	n.mu.Lock()
 	delete(n.notified, key)
+	n.retryAfter[key] = n.app.Clock().Add(n.retryDelay)
 	n.mu.Unlock()
-	fmt.Fprintf(n.app.Stdout, "[watch] %s: %s did not advance %s; will retry\n", time.Now().UTC().Format(time.RFC3339), rule.Client, snapshot.Task.ID)
+	fmt.Fprintf(n.app.Stdout, "[watch] %s: %s did not advance %s; will retry in %s\n", time.Now().UTC().Format(time.RFC3339), rule.Client, snapshot.Task.ID, n.retryDelay)
 }
 
 func (n *wakeNotifier) markNotified(key string) {

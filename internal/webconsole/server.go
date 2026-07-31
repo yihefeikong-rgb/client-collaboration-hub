@@ -333,6 +333,8 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request, taskID, ac
 		args = []string{"review", "request-changes", "--task", taskID, "--actor", request.Actor, "--body", request.Feedback, "--expected-version", version}
 	case "approve":
 		args = []string{"review", "approve", "--task", taskID, "--actor", request.Actor, "--expected-version", version}
+	case "message":
+		args = []string{"message", "add", "--task", taskID, "--actor", request.Actor, "--body", request.Feedback, "--expected-version", version}
 	default:
 		s.writeError(w, http.StatusNotFound, "unknown action")
 		return
