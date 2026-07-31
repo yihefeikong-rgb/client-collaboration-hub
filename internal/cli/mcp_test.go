@@ -94,7 +94,7 @@ func TestMCPServerExposesControlledToolsAndGuide(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resource.Contents) != 1 || !strings.Contains(resource.Contents[0].Text, "人类专属操作") {
+	if len(resource.Contents) != 1 || !strings.Contains(resource.Contents[0].Text, "终审模式") {
 		t.Fatal("MCP operating guide was not returned")
 	}
 }

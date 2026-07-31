@@ -51,6 +51,8 @@ func (a *App) run(ctx context.Context, args []string, jsonOutput bool) (int, err
 		return a.projectBind(ctx, args[2:], jsonOutput)
 	case matches(args, "project", "binding-status"):
 		return a.projectBindingStatus(ctx, args[2:], jsonOutput)
+	case matches(args, "project", "policy"):
+		return a.projectPolicy(ctx, args[2:], jsonOutput)
 	case matches(args, "task", "create"):
 		return a.taskCreate(ctx, args[2:], jsonOutput)
 	case matches(args, "agent", "task-create"):
@@ -285,6 +287,66 @@ func (a *App) projectBindingStatus(ctx context.Context, args []string, jsonOutpu
 	}
 	a.writeBinding(jsonOutput, binding.ProjectID, binding.DeviceID, binding.Revision, a.Bindings.BindingAvailable(ctx, binding.DeviceID, binding.ProjectID))
 	return ExitOK, nil
+}
+
+// projectPolicy switches the final-review mode of a project. This is a
+// human-only operation: every switch is appended to the project policy audit
+// history with the acting operator id.
+func (a *App) projectPolicy(ctx context.Context, args []string, jsonOutput bool) (int, error) {
+	fs := newFlagSet("project policy")
+	project := fs.String("project", "", "")
+	review := fs.String("final-review", "", "")
+	actor := fs.String("actor", "operator", "")
+	if err := parse(fs, args); err != nil {
+		return ExitValidation, err
+	}
+	if err := require("project", *project, "final-review", *review); err != nil || !protocol.IsValidID(*actor) {
+		return ExitValidation, errUsage
+	}
+	var final protocol.FinalReviewMode
+	switch *review {
+	case string(protocol.FinalReviewHuman):
+		final = protocol.FinalReviewHuman
+	case string(protocol.FinalReviewAgent):
+		final = protocol.FinalReviewAgent
+	default:
+		return ExitValidation, errUsage
+	}
+	current, err := a.Registry.ReadProject(ctx, *project)
+	if err != nil {
+		return exitCode(err), err
+	}
+	policy := protocol.CollaborationPolicy{
+		SubmissionMode: protocol.SubmissionModeAgentAuto,
+		FinalReview:    final,
+		AutoDone:       final == protocol.FinalReviewAgent,
+	}
+	if current.CollaborationPolicy == policy {
+		if jsonOutput {
+			a.writeJSON(updatedPolicyOutput{ProjectID: current.ID, FinalReview: current.CollaborationPolicy.FinalReview, AutoDone: current.CollaborationPolicy.AutoDone, PolicyVersion: current.PolicyVersion, Changed: false})
+		} else {
+			fmt.Fprintf(a.Stdout, "project_id: %s\nfinal_review: %s\nauto_done: %t\npolicy_version: %d\nchanged: false\n", current.ID, current.CollaborationPolicy.FinalReview, current.CollaborationPolicy.AutoDone, current.PolicyVersion)
+		}
+		return ExitOK, nil
+	}
+	updated, err := a.Registry.UpdateProjectPolicy(ctx, current.ID, current.PolicyVersion, *actor, policy, a.now())
+	if err != nil {
+		return exitCode(err), err
+	}
+	if jsonOutput {
+		a.writeJSON(updatedPolicyOutput{ProjectID: updated.ID, FinalReview: updated.CollaborationPolicy.FinalReview, AutoDone: updated.CollaborationPolicy.AutoDone, PolicyVersion: updated.PolicyVersion, Changed: true})
+	} else {
+		fmt.Fprintf(a.Stdout, "project_id: %s\nfinal_review: %s\nauto_done: %t\npolicy_version: %d\nchanged: true\n", updated.ID, updated.CollaborationPolicy.FinalReview, updated.CollaborationPolicy.AutoDone, updated.PolicyVersion)
+	}
+	return ExitOK, nil
+}
+
+type updatedPolicyOutput struct {
+	ProjectID     string                   `json:"project_id"`
+	FinalReview   protocol.FinalReviewMode `json:"final_review"`
+	AutoDone      bool                     `json:"auto_done"`
+	PolicyVersion int64                    `json:"policy_version"`
+	Changed       bool                     `json:"changed"`
 }
 
 func (a *App) taskCreate(ctx context.Context, args []string, jsonOutput bool) (int, error) {
