@@ -20,6 +20,10 @@
 
   const ACTION_PRIORITY = ["approve", "request_changes"];
   const FILTERED_STATES = new Set(["REVIEW", "WORKING", "REVISION_REQUIRED", "BLOCKED"]);
+  const FINAL_REVIEW_LABELS = {
+    human: "人工终审",
+    agent: "Agent 终审",
+  };
 
   let csrfToken = "";
   let overview = null;
@@ -102,6 +106,15 @@
   function projectName(id) {
     const match = overview && overview.projects.find((project) => project.id === id);
     return match ? match.name : (id || "—");
+  }
+
+  function selectedProjectView() {
+    if (!overview || !selectedProject) return null;
+    return overview.projects.find((project) => project.id === selectedProject) || null;
+  }
+
+  function finalReviewLabel(value) {
+    return FINAL_REVIEW_LABELS[value] || "—";
   }
 
   function nextStep(task) {
@@ -286,6 +299,16 @@
     select.value = selectedProject;
   }
 
+  function renderProjectPolicy() {
+    const project = selectedProjectView();
+    if (!project) {
+      byID("queue-final-review").textContent = "—";
+      return;
+    }
+    const detail = project.policy_version ? ` · v${project.policy_version}` : "";
+    byID("queue-final-review").textContent = `${finalReviewLabel(project.final_review)}${detail}`;
+  }
+
   function submissionLabel(status) {
     return { RECEIVED: "待处理", ACCEPTED: "已登记", REJECTED: "已拒绝", UNKNOWN: "结果未知" }[status] || status || "未知";
   }
@@ -353,6 +376,7 @@
     byID("queue-storage-health").textContent = initialized ? "已初始化" : "尚未初始化";
     byID("queue-client-summary").textContent = `${value.clients.length} 个已登记客户端`;
     renderProjectSelector();
+    renderProjectPolicy();
     byID("not-initialized").hidden = initialized;
     const scopedTasks = value.tasks.filter((task) => !selectedProject || task.project_id === selectedProject);
     renderCounts(scopedTasks);
@@ -575,6 +599,7 @@
     health.textContent = view.health || "UNKNOWN";
     setText("task-event", `#${view.state.last_event_id}`);
     setText("task-updated", formatTime(view.state.updated_at));
+    setText("task-final-review", finalReviewLabel(view.project.final_review));
     setText("task-objective", view.task.objective, "未提供目标。");
 
     const acceptance = byID("acceptance-list");
@@ -766,6 +791,7 @@
         showView("queue");
       }
       renderCounts(overview.tasks.filter((task) => !selectedProject || task.project_id === selectedProject));
+      renderProjectPolicy();
       renderQueue();
       renderAttention(overview.tasks.filter((task) => !selectedProject || task.project_id === selectedProject));
     });

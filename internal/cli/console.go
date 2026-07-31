@@ -253,7 +253,32 @@ func consoleClient(value protocol.Client) webconsole.Client {
 }
 
 func consoleProject(value protocol.Project) webconsole.Project {
-	return webconsole.Project{ID: value.ID, Name: value.Name, CreatedAt: consoleTime(value.CreatedAt)}
+	project := webconsole.Project{
+		ID:            value.ID,
+		Name:          value.Name,
+		CreatedAt:     consoleTime(value.CreatedAt),
+		FinalReview:   string(value.CollaborationPolicy.FinalReview),
+		AutoDone:      value.CollaborationPolicy.AutoDone,
+		PolicyVersion: value.PolicyVersion,
+	}
+	if len(value.PolicyHistory) > 0 {
+		latest := value.PolicyHistory[len(value.PolicyHistory)-1]
+		project.RecentPolicyAudit = &webconsole.PolicyAuditView{
+			Version:  latest.Version,
+			Actor:    latest.Actor,
+			At:       consoleTime(latest.At),
+			Previous: consolePolicyView(latest.Previous),
+			Current:  consolePolicyView(latest.Current),
+		}
+	}
+	return project
+}
+
+func consolePolicyView(value protocol.CollaborationPolicy) webconsole.PolicyView {
+	return webconsole.PolicyView{
+		FinalReview: string(value.FinalReview),
+		AutoDone:    value.AutoDone,
+	}
 }
 
 func consoleTask(value protocol.Task) webconsole.Task {

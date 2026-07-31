@@ -1,5 +1,6 @@
 collaboration/
 collab.exe
+collab-new.exe
 .worktrees/
 *.log
 *.bak

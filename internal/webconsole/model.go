@@ -56,6 +56,25 @@ type Project struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	CreatedAt string `json:"created_at"`
+
+	// 项目协作策略数据：终审模式（人工终审或 Agent 终审）、自动完成、策略版本与最近切换审计。
+	FinalReview       string           `json:"final_review,omitempty"`
+	AutoDone          bool             `json:"auto_done,omitempty"`
+	PolicyVersion     int64            `json:"policy_version,omitempty"`
+	RecentPolicyAudit *PolicyAuditView `json:"recent_policy_audit,omitempty"`
+}
+
+type PolicyAuditView struct {
+	Version  int64      `json:"version"`
+	Actor    string     `json:"actor"`
+	At       string     `json:"at"`
+	Previous PolicyView `json:"previous"`
+	Current  PolicyView `json:"current"`
+}
+
+type PolicyView struct {
+	FinalReview string `json:"final_review"`
+	AutoDone    bool   `json:"auto_done"`
 }
 
 type Task struct {

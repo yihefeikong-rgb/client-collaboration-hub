@@ -280,6 +280,9 @@ func (s *Service) reconcileAppliedResponse(ctx context.Context, receipt Receipt,
 func (s *Service) reconcileResponseAfterJournalError(ctx context.Context, receipt Receipt, response handoff.CandidateResponse) (Result, error) {
 	snapshot, err := s.Query.Snapshot(ctx, response.TaskID, 0)
 	if err != nil {
+		if errors.Is(err, store.ErrTaskNotFound) {
+			return Result{}, errNoSubmissionEvents
+		}
 		return s.unknown(ctx, receipt, protocol.State{}, fmt.Errorf("read post-commit task state: %w", err))
 	}
 	if snapshot.Health != store.Healthy {
@@ -295,6 +298,9 @@ func (s *Service) reconcileResponseAfterJournalError(ctx context.Context, receip
 func (s *Service) reconcileCreatedTaskAfterJournalError(ctx context.Context, receipt Receipt, taskID string) (Result, error) {
 	snapshot, err := s.Query.Snapshot(ctx, taskID, 0)
 	if err != nil {
+		if errors.Is(err, store.ErrTaskNotFound) {
+			return Result{}, errNoSubmissionEvents
+		}
 		return s.unknown(ctx, receipt, protocol.State{}, fmt.Errorf("read post-commit task state: %w", err))
 	}
 	if snapshot.Health != store.Healthy {

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/protocol"
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/store"
 )
 
@@ -135,6 +136,88 @@ func TestConsoleOverviewDoesNotInitializeFilesystem(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "collaboration")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing task lookup created collaboration directory: %v", err)
+	}
+}
+
+func TestConsoleProjectIncludesPolicyData(t *testing.T) {
+	now := time.Date(2026, 7, 31, 9, 0, 0, 0, time.UTC)
+	agentPolicy := protocol.CollaborationPolicy{
+		SubmissionMode: protocol.SubmissionModeAgentAuto,
+		FinalReview:    protocol.FinalReviewAgent,
+		AutoDone:       true,
+	}
+	project := protocol.Project{
+		ID:                  "demo",
+		Name:                "Demo",
+		CreatedAt:           now,
+		CollaborationPolicy: agentPolicy,
+		PolicyVersion:       2,
+		PolicyHistory: []protocol.PolicyAuditEntry{
+			{
+				Version:  2,
+				Actor:    "codex",
+				Origin:   protocol.EventOriginHuman,
+				At:       now.Add(time.Hour),
+				Previous: protocol.DefaultCollaborationPolicy(),
+				Current:  agentPolicy,
+			},
+		},
+	}
+	view := consoleProject(project)
+	if view.FinalReview != "agent" || !view.AutoDone || view.PolicyVersion != 2 {
+		t.Fatalf("console project policy view=%+v", view)
+	}
+	if view.RecentPolicyAudit == nil {
+		t.Fatal("expected recent policy audit")
+	}
+	audit := view.RecentPolicyAudit
+	if audit.Version != 2 || audit.Actor != "codex" || audit.Previous.FinalReview != "human" || audit.Previous.AutoDone || audit.Current.FinalReview != "agent" || !audit.Current.AutoDone {
+		t.Fatalf("recent policy audit=%+v", audit)
+	}
+}
+
+func TestConsoleProjectWithoutHistoryHasNilAudit(t *testing.T) {
+	view := consoleProject(protocol.Project{})
+	if view.FinalReview != "" || view.AutoDone || view.PolicyVersion != 0 || view.RecentPolicyAudit != nil {
+		t.Fatalf("console project without policy=%+v", view)
+	}
+}
+
+func TestConsoleOverviewExposesProjectPolicyData(t *testing.T) {
+	now := time.Now().UTC()
+	app := NewApp(t.TempDir(), io.Discard, io.Discard, func() time.Time { return now })
+	reader := appConsoleReader{app: app}
+	ctx := context.Background()
+
+	agentPolicy := protocol.CollaborationPolicy{
+		SubmissionMode: protocol.SubmissionModeAgentAuto,
+		FinalReview:    protocol.FinalReviewAgent,
+		AutoDone:       true,
+	}
+	if err := app.Registry.CreateProject(ctx, protocol.Project{ID: "demo", Name: "Demo", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := app.Registry.UpdateProjectPolicy(ctx, "demo", 1, "codex", agentPolicy, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.PolicyVersion != 2 {
+		t.Fatalf("policy version=%d", updated.PolicyVersion)
+	}
+
+	overview, err := reader.Overview(ctx, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(overview.Projects) != 1 {
+		t.Fatalf("projects=%d", len(overview.Projects))
+	}
+	view := overview.Projects[0]
+	if view.FinalReview != "agent" || !view.AutoDone || view.PolicyVersion != 2 {
+		t.Fatalf("project policy view=%+v", view)
+	}
+	if view.RecentPolicyAudit == nil || view.RecentPolicyAudit.Current.FinalReview != "agent" || view.RecentPolicyAudit.Previous.FinalReview != "human" {
+		t.Fatalf("project policy audit=%+v", view.RecentPolicyAudit)
 	}
 }
 
