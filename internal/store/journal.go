@@ -63,6 +63,7 @@ type TaskJournal interface {
 	AddEvidence(context.Context, string, int64, protocol.Evidence) (EvidenceAddResult, error)
 	ApplyAgentSubmission(context.Context, string, int64, AgentSubmission) (AgentSubmissionResult, error)
 	RecoverTail(context.Context, string) (RecoveryReport, error)
+	ListTaskIDs(context.Context) ([]string, error)
 }
 
 type AtomicReplacer interface {

@@ -41,6 +41,8 @@ func (a *App) run(ctx context.Context, args []string, jsonOutput bool) (int, err
 			return exitCode(err), err
 		}
 		return ExitOK, nil
+	case len(args) >= 1 && args[0] == "watch":
+		return a.watch(ctx, args[1:], jsonOutput)
 	case matches(args, "client", "register"):
 		return a.clientRegister(ctx, args[2:], jsonOutput)
 	case matches(args, "project", "create"):
