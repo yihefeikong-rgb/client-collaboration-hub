@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -80,6 +81,7 @@ func (r appConsoleReader) Overview(ctx context.Context, actor, device string) (w
 		Projects:    make([]webconsole.Project, 0, len(projects)),
 		Tasks:       make([]webconsole.TaskSummary, 0, len(ids)),
 		Submissions: make([]webconsole.AgentSubmission, 0),
+		Deliveries:  make([]webconsole.DeliveryView, 0),
 	}
 	for _, client := range clients {
 		result.Clients = append(result.Clients, consoleClient(client))
@@ -114,6 +116,7 @@ func (r appConsoleReader) Overview(ctx context.Context, actor, device string) (w
 			result.Submissions = append(result.Submissions, consoleSubmission(receipt))
 		}
 	}
+	result.Deliveries = consoleDeliveries(r.app.Root)
 	return result, nil
 }
 
@@ -355,4 +358,52 @@ func consoleTime(value time.Time) string {
 		return ""
 	}
 	return value.UTC().Format(time.RFC3339Nano)
+}
+
+type consoleWakeState struct {
+	Notified   map[string]bool                `json:"notified"`
+	WakeAt     map[string]time.Time           `json:"wake_at,omitempty"`
+	Deliveries map[string]consoleWakeDelivery `json:"deliveries,omitempty"`
+}
+
+type consoleWakeDelivery struct {
+	ID        string    `json:"id"`
+	TaskID    string    `json:"task_id"`
+	Client    string    `json:"client"`
+	Status    string    `json:"status"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// consoleDeliveries exposes the watch-side desktop delivery ledger to the web
+// console so a human can see which task was sent to which client and whether
+// the desktop conversation confirmed the turn.
+func consoleDeliveries(root string) []webconsole.DeliveryView {
+	path := filepath.Join(root, "collaboration", ".runtime", "wake-state.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return []webconsole.DeliveryView{}
+	}
+	var state consoleWakeState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return []webconsole.DeliveryView{}
+	}
+	views := make([]webconsole.DeliveryView, 0, len(state.Deliveries))
+	for key, delivery := range state.Deliveries {
+		view := webconsole.DeliveryView{
+			DeliveryID: delivery.ID,
+			TaskID:     delivery.TaskID,
+			Client:     delivery.Client,
+			Status:     delivery.Status,
+			UpdatedAt:  consoleTime(delivery.UpdatedAt),
+			Notified:   state.Notified[key],
+		}
+		if wokenAt, ok := state.WakeAt[key]; ok {
+			view.WakeAt = consoleTime(wokenAt)
+		}
+		views = append(views, view)
+	}
+	sort.Slice(views, func(i, j int) bool {
+		return views[i].UpdatedAt > views[j].UpdatedAt
+	})
+	return views
 }

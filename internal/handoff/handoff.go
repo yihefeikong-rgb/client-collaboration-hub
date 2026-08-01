@@ -335,6 +335,8 @@ func adapterForTarget(clientID string) string {
 		return "manual-codex"
 	case "cc-haha":
 		return "manual-cc-haha"
+	case "reasonix":
+		return "manual-reasonix"
 	default:
 		return ""
 	}
@@ -421,6 +423,8 @@ func adapterFor(name string) (ClientAdapter, error) {
 		return ManualCodexAdapter{}, nil
 	case "manual-cc-haha":
 		return ManualCCHahaAdapter{}, nil
+	case "manual-reasonix":
+		return ManualReasonixAdapter{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported handoff adapter")
 	}
@@ -460,6 +464,20 @@ func (adapter ManualCCHahaAdapter) Export(ctx context.Context, snapshot store.Ta
 		return DeliveryPackage{}, fmt.Errorf("manual-cc-haha target has no permitted action")
 	}
 	return buildPackage(ctx, adapter.Name(), snapshot, binding, "executor")
+}
+
+type ManualReasonixAdapter struct{}
+
+func (ManualReasonixAdapter) Name() string { return "manual-reasonix" }
+
+func (adapter ManualReasonixAdapter) Export(ctx context.Context, snapshot store.TaskSnapshot, binding BindingView) (DeliveryPackage, error) {
+	if binding.TargetClient != snapshot.State.ResponsibleClient {
+		return DeliveryPackage{}, fmt.Errorf("manual-reasonix target is not currently responsible")
+	}
+	if snapshot.State.Status != protocol.Review {
+		return DeliveryPackage{}, fmt.Errorf("manual-reasonix handoff requires REVIEW status")
+	}
+	return buildPackage(ctx, adapter.Name(), snapshot, binding, "reviewer")
 }
 
 type ManifestTask struct {
@@ -553,7 +571,7 @@ func (m Manifest) ComputedPackageID() (string, error) {
 }
 
 func (m Manifest) Validate() error {
-	if m.FormatVersion != "1" || (m.Adapter != "manual-codex" && m.Adapter != "manual-cc-haha") || !protocol.IsValidID(m.ActionActor) || !protocol.IsValidID(m.TaskID) || !protocol.IsValidID(m.ProjectID) || !protocol.IsValidID(m.ResponsibleClient) || protocol.ValidatePortableText("project revision", m.ProjectRevision) != nil {
+	if m.FormatVersion != "1" || (m.Adapter != "manual-codex" && m.Adapter != "manual-cc-haha" && m.Adapter != "manual-reasonix") || !protocol.IsValidID(m.ActionActor) || !protocol.IsValidID(m.TaskID) || !protocol.IsValidID(m.ProjectID) || !protocol.IsValidID(m.ResponsibleClient) || protocol.ValidatePortableText("project revision", m.ProjectRevision) != nil {
 		return fmt.Errorf("invalid handoff manifest identity")
 	}
 	if err := m.TargetData.Validate(); err != nil {

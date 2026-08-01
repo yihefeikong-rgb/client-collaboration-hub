@@ -125,6 +125,8 @@ func adapterOutputRequirement(adapter string) (string, error) {
 		return "仅生成候选响应 JSON；操作者审核结构化步骤后手工执行 CLI，不会控制 Codex Desktop。", nil
 	case "manual-cc-haha":
 		return "仅生成候选响应 JSON；操作者审核结构化步骤后手工执行 CLI，不会读取或控制 CC-HAHA 的内部会话、技能、MCP 或登录态。", nil
+	case "manual-reasonix":
+		return "仅生成候选响应 JSON；操作者审核结构化步骤后手工执行 CLI，不会读取或控制 Reasonix 的内部会话、技能、MCP 或登录态。", nil
 	default:
 		return "", fmt.Errorf("unsupported handoff adapter")
 	}

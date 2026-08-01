@@ -143,6 +143,58 @@ func TestManualCodexHandoffUsesReviewActionsAndCursor(t *testing.T) {
 	}
 }
 
+func TestManualReasonixHandoffUsesReviewerRoleAndReviewStatus(t *testing.T) {
+	fixture := newWorkingHandoffFixture(t)
+	snapshot, err := fixture.query.SnapshotForActor(context.Background(), "T-0001", 0, "cc-haha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.State.Status = protocol.Review
+	snapshot.State.ResponsibleClient = "reasonix"
+	snapshot.ActionActor = "reasonix"
+	snapshot.AllowedActions = []protocol.Action{protocol.Approve, protocol.RequestChanges}
+	view, err := fixture.service.bindingView(context.Background(), fixture.binding, protocol.Client{ID: "reasonix", Name: "Reasonix (RE)"}, snapshot.Evidence, snapshot.ActionActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageData, err := (ManualReasonixAdapter{}).Export(context.Background(), snapshot, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(packageData.Manifest, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Adapter != "manual-reasonix" || manifest.TargetData.ID != "reasonix" || manifest.TargetData.Role != "reviewer" || manifest.Status != protocol.Review {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+	text := string(packageData.Handoff)
+	if !strings.Contains(text, "- `approve`") || !strings.Contains(text, "- `request_changes`") || !strings.Contains(text, "不会读取或控制 Reasonix") {
+		t.Fatalf("manual-reasonix handoff = %s", text)
+	}
+}
+
+func TestManualReasonixHandoffRequiresReviewAndResponsibility(t *testing.T) {
+	fixture := newWorkingHandoffFixture(t)
+	snapshot, err := fixture.query.SnapshotForActor(context.Background(), "T-0001", 0, "cc-haha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := fixture.service.bindingView(context.Background(), fixture.binding, protocol.Client{ID: "reasonix", Name: "Reasonix (RE)"}, snapshot.Evidence, snapshot.ActionActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.State.ResponsibleClient = "reasonix"
+	if _, err := (ManualReasonixAdapter{}).Export(context.Background(), snapshot, view); err == nil || !strings.Contains(err.Error(), "REVIEW") {
+		t.Fatalf("non-review export error = %v", err)
+	}
+	snapshot.State.Status = protocol.Review
+	snapshot.State.ResponsibleClient = "cc-haha"
+	if _, err := (ManualReasonixAdapter{}).Export(context.Background(), snapshot, view); err == nil || !strings.Contains(err.Error(), "not currently responsible") {
+		t.Fatalf("wrong responsible export error = %v", err)
+	}
+}
+
 func TestHandoffRejectsUnsafePortableContentWithoutLeakingIt(t *testing.T) {
 	fixture := newWorkingHandoffFixture(t)
 	snapshot, err := fixture.query.Snapshot(context.Background(), "T-0001", 0)

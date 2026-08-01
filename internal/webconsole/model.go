@@ -35,6 +35,16 @@ type AgentSubmission struct {
 	UpdatedAt       string  `json:"updated_at"`
 }
 
+type DeliveryView struct {
+	DeliveryID string `json:"delivery_id"`
+	TaskID     string `json:"task_id"`
+	Client     string `json:"client"`
+	Status     string `json:"status"`
+	UpdatedAt  string `json:"updated_at"`
+	Notified   bool   `json:"notified"`
+	WakeAt     string `json:"wake_at,omitempty"`
+}
+
 type HandoffRecord struct {
 	TargetClient string `json:"target_client"`
 	Adapter      string `json:"adapter"`
@@ -141,6 +151,7 @@ type Overview struct {
 	Projects    []Project         `json:"projects"`
 	Tasks       []TaskSummary     `json:"tasks"`
 	Submissions []AgentSubmission `json:"submissions"`
+	Deliveries  []DeliveryView    `json:"deliveries"`
 }
 
 type TaskView struct {

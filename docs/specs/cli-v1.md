@@ -59,9 +59,9 @@ creator 的 create_task capability 与目标 execute capability。DONE 拒绝所
 `init` 创建 `projects/`、`clients/`、`tasks/`、`bindings/`、`.runtime/`，并且不覆盖已有
 `.gitignore` 内容；只追加 `collaboration/.runtime/`、`collaboration/bindings/` 和 `collab.exe`。
 
-handoff adapter 只支持 `manual-codex` 与 `manual-cc-haha`，并且只生成文件交接包；不会导入、
-启动、控制或读取 Codex、CC-HAHA、AO 或任何客户端的内部状态。目标客户端除角色与当前动作
-权限外，必须具备 `import_export` capability。
+handoff adapter 支持 `manual-codex`、`manual-cc-haha` 与 `manual-reasonix`，并且只生成文件
+交接包；不会导入、启动、控制或读取 Codex、CC-HAHA、Reasonix、AO 或任何客户端的内部状态。
+目标客户端除角色与当前动作权限外，必须具备 `import_export` capability。
 
 handoff export 仅允许 HEALTHY 任务。它要求所选设备已绑定任务项目，输出目录必须不存在，
 并且拒绝仓库根、`collaboration/`、其下路径、已有文件与已有符号链接；自动 `handoff next` 唯一

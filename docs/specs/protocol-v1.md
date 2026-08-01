@@ -134,8 +134,9 @@ allowed_actions。`Snapshot` 为 status 选择默认 actor（通常是责任方�
 after_event 必须介于 0 和 last_event_id；事件严格满足 `event_id > after_event`。只有
 `HEALTHY` Snapshot 可导出。
 
-`manual-codex` 和 `manual-cc-haha` 适配器只生成文件交接包。目标客户端必须已注册、具备
-`import_export`，并符合适配器角色：前者面向 creator/reviewer，后者面向 assigned executor。
+`manual-codex`、`manual-cc-haha` 和 `manual-reasonix` 适配器只生成文件交接包。目标客户端
+必须已注册、具备 `import_export`，并符合适配器角色：`manual-codex` 面向 creator/reviewer，
+`manual-cc-haha` 面向 assigned executor，`manual-reasonix` 面向 REVIEW 状态的责任审核者。
 普通状态导出给责任方；`BLOCKED` 的 manual-codex 可交给具备 `assign` 权限的 creator。manifest
 中的 `action_actor` 明确标识可以执行建议命令的客户端，不能用 responsible_client 替代。
 

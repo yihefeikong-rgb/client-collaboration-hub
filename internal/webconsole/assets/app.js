@@ -371,6 +371,30 @@
     }
   }
 
+  function renderDeliveries() {
+    const deliveries = (overview && overview.deliveries) || [];
+    const list = byID("queue-deliveries");
+    clearNode(list);
+    if (!deliveries.length) {
+      const item = document.createElement("li");
+      item.className = "table-muted";
+      item.textContent = "暂无桌面投递记录";
+      list.appendChild(item);
+      return;
+    }
+    for (const delivery of deliveries.slice(0, 6)) {
+      const item = document.createElement("li");
+      const title = document.createElement("div");
+      title.className = "task-title";
+      title.textContent = `${delivery.task_id} → ${clientName(delivery.client) || delivery.client}`;
+      const meta = document.createElement("div");
+      meta.className = "table-muted";
+      meta.textContent = `${delivery.status} · ${formatTime(delivery.updated_at)}`;
+      item.append(title, meta);
+      list.appendChild(item);
+    }
+  }
+
   function renderOverview(value, options = {}) {
     overview = value;
     const initialized = Boolean(value.initialized);
@@ -387,6 +411,7 @@
     renderSetup();
     renderActivity();
     renderHandoffHistory();
+    renderDeliveries();
     if (options.announce !== false) {
       if (!initialized) {
         setStatus("协作中枢尚未初始化；请先完成本机初始化。", "");

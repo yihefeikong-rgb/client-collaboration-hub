@@ -252,7 +252,7 @@ func (entry HandoffHistoryEntry) validate(workspaceRoot string) error {
 }
 
 func validAdapter(value string) bool {
-	return value == "manual-codex" || value == "manual-cc-haha"
+	return value == "manual-codex" || value == "manual-cc-haha" || value == "manual-reasonix"
 }
 
 func validPackageID(value string) bool {
