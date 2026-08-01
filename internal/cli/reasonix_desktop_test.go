@@ -415,9 +415,9 @@ func TestReasonixAdapterDoctorReportsIncompatibleProcessTrust(t *testing.T) {
 	}
 }
 
-func TestAdapterDoctorAcceptsOnlyReasonixOrAll(t *testing.T) {
+func TestAdapterDoctorAcceptsOnlyReasonixCCHahaOrAll(t *testing.T) {
 	app := NewApp(t.TempDir(), &bytes.Buffer{}, &bytes.Buffer{}, nil)
-	for _, client := range []string{"cc-haha", "codex", ""} {
+	for _, client := range []string{"codex", "bogus", ""} {
 		if code := app.Run([]string{"adapter", "doctor", "--client", client}); code != ExitValidation {
 			t.Fatalf("client %q exit code = %d, want %d", client, code, ExitValidation)
 		}

@@ -142,6 +142,7 @@ type wakeNotifier struct {
 	dryRun              bool
 	ccCommand           string
 	codexCommand        string
+	ccHahahaWorkProfile string
 	reasonixWorkProfile string
 	taskTimeout         time.Duration
 	retryDelay          time.Duration
@@ -168,6 +169,7 @@ func (a *App) watch(ctx context.Context, args []string, jsonOutput bool) (int, e
 	once := fs.Bool("once", false, "")
 	ccCommand := fs.String("cc-command", "claude", "")
 	codexCommand := fs.String("codex-command", "codex", "")
+	ccHahahaWorkProfile := fs.String("cc-work-profile", ccHahahaWorkDefault, "")
 	reasonixWorkProfile := fs.String("reasonix-work-profile", reasonixWorkDelivery, "")
 	taskTimeout := fs.Duration("task-timeout", 30*time.Minute, "")
 	retryDelay := fs.Duration("retry-delay", 60*time.Second, "")
@@ -179,12 +181,17 @@ func (a *App) watch(ctx context.Context, args []string, jsonOutput bool) (int, e
 	if err != nil {
 		return ExitValidation, fmt.Errorf("--reasonix-work-profile %w", err)
 	}
+	normalizedCCHahaWorkProfile, err := normalizeCCHahaWorkProfile(*ccHahahaWorkProfile)
+	if err != nil {
+		return ExitValidation, fmt.Errorf("--cc-work-profile %w", err)
+	}
 	notifier := &wakeNotifier{
 		app:                 a,
 		interval:            *interval,
 		dryRun:              *dryRun,
 		ccCommand:           *ccCommand,
 		codexCommand:        *codexCommand,
+		ccHahahaWorkProfile: normalizedCCHahaWorkProfile,
 		reasonixWorkProfile: normalizedReasonixWorkProfile,
 		taskTimeout:         *taskTimeout,
 		retryDelay:          *retryDelay,
@@ -209,7 +216,7 @@ func (a *App) watch(ctx context.Context, args []string, jsonOutput bool) (int, e
 		return exitCode(err), err
 	}
 	defer notifier.save()
-	fmt.Fprintf(a.Stdout, "collab watch started (interval=%s dry_run=%t cc=%s codex=%s reasonix=desktop(normal/%s/auto))\n", notifier.interval, notifier.dryRun, notifier.ccCommand, notifier.codexCommand, notifier.reasonixWorkProfile)
+	fmt.Fprintf(a.Stdout, "collab watch started (interval=%s dry_run=%t cc=%s codex=%s cc-haha=desktop(normal/%s/ask) reasonix=desktop(normal/%s/auto))\n", notifier.interval, notifier.dryRun, notifier.ccCommand, notifier.codexCommand, notifier.ccHahahaWorkProfile, notifier.reasonixWorkProfile)
 	notifier.scan(watchCtx)
 	if *once {
 		fmt.Fprintln(a.Stdout, "collab watch completed one scan")
@@ -454,7 +461,7 @@ func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.
 		}
 	}
 	if rule.Client == "cc-haha" {
-		if err := n.wakeCCHaha(ctx, snapshot, prompt, deliveryID); err != nil {
+		if err := n.wakeCCHahaDesktop(ctx, snapshot.Task.ID, workDir, prompt, deliveryID); err != nil {
 			fmt.Fprintf(n.app.Stderr, "[watch] %s: CC-HAHA wake failed for %s: %v\n", time.Now().UTC().Format(time.RFC3339), snapshot.Task.ID, err)
 			if isUncertainDelivery(err) {
 				n.markDelivery(key, wakeDeliveryUncertain)

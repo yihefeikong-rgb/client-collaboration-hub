@@ -35,6 +35,7 @@ const (
 	reasonixWorkBalanced    = "balanced"
 	reasonixWorkDelivery    = "delivery"
 	reasonixApprovalAuto    = "auto"
+	reasonixApprovalYolo    = "yolo"
 )
 
 type reasonixDesktopBridgeDiscovery struct {
@@ -178,8 +179,10 @@ func (n *wakeNotifier) wakeReasonixDesktopAt(ctx context.Context, taskID, worksp
 	if result.DeliveryID != deliveryID || result.TaskID != taskID || result.TabID == "" || result.TopicID == "" {
 		return uncertainDelivery(errors.New("Reasonix desktop bridge did not confirm the visible task conversation"))
 	}
-	if result.CollaborationMode != reasonixExecutionNormal || result.WorkProfile != workProfile || result.ToolApprovalMode != reasonixApprovalAuto {
-		return uncertainDelivery(fmt.Errorf("Reasonix desktop bridge did not confirm normal/%s/auto", workProfile))
+	if result.CollaborationMode != reasonixExecutionNormal ||
+		result.WorkProfile != workProfile ||
+		(result.ToolApprovalMode != reasonixApprovalAuto && result.ToolApprovalMode != reasonixApprovalYolo) {
+		return uncertainDelivery(fmt.Errorf("Reasonix desktop bridge did not confirm normal/%s/auto-or-yolo", workProfile))
 	}
 	return nil
 }
