@@ -137,6 +137,21 @@ type submissionsOutput struct {
 	Submissions []webconsole.AgentSubmission `json:"submissions"`
 }
 
+type claimInput struct {
+	TaskID   string `json:"task_id" jsonschema:"task to claim or release"`
+	Actor    string `json:"actor" jsonschema:"claiming client id"`
+	Worktree string `json:"worktree" jsonschema:"absolute path of the isolated working tree; required unless release is true"`
+	Release  bool   `json:"release,omitempty" jsonschema:"release the claim instead of (re)claiming"`
+}
+
+type claimOutput struct {
+	TaskID    string `json:"task_id"`
+	ClaimedBy string `json:"claimed_by"`
+	Worktree  string `json:"worktree"`
+	ClaimedAt string `json:"claimed_at,omitempty"`
+	Released  bool   `json:"released,omitempty"`
+}
+
 func (a *App) NewMCPServer() *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:        "client-collaboration-hub",
@@ -207,6 +222,24 @@ func (a *App) NewMCPServer() *mcp.Server {
 				}
 			}
 			return nil, tasksOutput{Tasks: tasks}, nil
+		})
+
+	mcp.AddTool(server, &mcp.Tool{Name: "collab_task_claim", Title: "认领任务工作区", Description: "Claim or release an isolated worktree for a task. Only the assigned or responsible client can claim, and a task can have exactly one claimer at a time; this prevents parallel agents from editing the same directory.", Annotations: additive},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input claimInput) (*mcp.CallToolResult, claimOutput, error) {
+			if !protocol.IsValidID(input.TaskID) || !protocol.IsValidID(input.Actor) {
+				return nil, claimOutput{}, errors.New("task_id or actor is invalid")
+			}
+			if input.Release {
+				if _, err := a.claimTask(ctx, input.TaskID, input.Actor, "", true); err != nil {
+					return nil, claimOutput{}, err
+				}
+				return nil, claimOutput{TaskID: input.TaskID, ClaimedBy: "", Worktree: "", Released: true}, nil
+			}
+			record, err := a.claimTask(ctx, input.TaskID, input.Actor, input.Worktree, false)
+			if err != nil {
+				return nil, claimOutput{}, err
+			}
+			return nil, claimOutput{TaskID: record.TaskID, ClaimedBy: record.ClaimedBy, Worktree: record.Worktree, ClaimedAt: record.ClaimedAt.UTC().Format(time.RFC3339Nano)}, nil
 		})
 
 	mcp.AddTool(server, &mcp.Tool{Name: "collab_create_task", Title: "创建任务候选", Description: "Create an auditable task through agent intake. The task starts in DRAFT and cannot bypass policy. Supply a stable task id when retry safety is required.", Annotations: nonIdempotentAdditive},

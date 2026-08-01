@@ -97,8 +97,8 @@ func TestMCPStdioTransportContentLength(t *testing.T) {
 	if err := json.Unmarshal(receive(), &tools); err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Result.Tools) != 11 {
-		t.Fatalf("Content-Length framed tool count = %d, want 11", len(tools.Result.Tools))
+	if len(tools.Result.Tools) != 12 {
+		t.Fatalf("Content-Length framed tool count = %d, want 12", len(tools.Result.Tools))
 	}
 	found := false
 	for _, tool := range tools.Result.Tools {

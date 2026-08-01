@@ -123,6 +123,9 @@ func TestWakeRuleAndPromptForSupplementMessage(t *testing.T) {
 	if !strings.Contains(prompt, "任务：T-WAKE-MSG") {
 		t.Fatalf("prompt does not carry task id: %s", prompt)
 	}
+	if !strings.Contains(prompt, "任务进展摘要") || !strings.Contains(prompt, "当前状态") || !strings.Contains(prompt, "补充消息：请先补上测试再提交") {
+		t.Fatalf("prompt does not carry progress summary: %s", prompt)
+	}
 }
 
 func TestWakeRuleAndPromptIgnoresOwnMessage(t *testing.T) {

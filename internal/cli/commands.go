@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/agentintake"
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/handoff"
@@ -67,6 +68,8 @@ func (a *App) run(ctx context.Context, args []string, jsonOutput bool) (int, err
 		return a.transition(ctx, args[2:], jsonOutput, protocol.Assign)
 	case matches(args, "task", "accept"):
 		return a.transition(ctx, args[2:], jsonOutput, protocol.Accept)
+	case matches(args, "task", "claim"):
+		return a.taskClaim(ctx, args[2:], jsonOutput)
 	case matches(args, "task", "resume"):
 		return a.transition(ctx, args[2:], jsonOutput, protocol.Resume)
 	case matches(args, "task", "submit"):
@@ -484,6 +487,66 @@ func (a *App) transition(ctx context.Context, args []string, jsonOutput bool, ac
 	}
 	a.writeState(jsonOutput, state)
 	return ExitOK, nil
+}
+
+func (a *App) taskClaim(ctx context.Context, args []string, jsonOutput bool) (int, error) {
+	fs := newFlagSet("task claim")
+	task := fs.String("task", "", "")
+	actor := fs.String("actor", "", "")
+	worktree := fs.String("worktree", "", "")
+	release := fs.Bool("release", false, "")
+	if err := parse(fs, args); err != nil {
+		return ExitValidation, err
+	}
+	if err := require("task", *task, "actor", *actor); err != nil {
+		return ExitValidation, errUsage
+	}
+	if !*release && strings.TrimSpace(*worktree) == "" {
+		return ExitValidation, errUsage
+	}
+	if *release {
+		if _, err := a.claimTask(ctx, *task, *actor, "", true); err != nil {
+			return exitCode(err), err
+		}
+		if jsonOutput {
+			a.writeJSON(map[string]string{"task_id": *task, "claimed_by": "", "worktree": "", "status": "released"})
+		} else {
+			fmt.Fprintf(a.Stdout, "task_id: %s status: released\n", *task)
+		}
+		return ExitOK, nil
+	}
+	record, err := a.claimTask(ctx, *task, *actor, *worktree, false)
+	if err != nil {
+		return exitCode(err), err
+	}
+	if jsonOutput {
+		a.writeJSON(map[string]string{"task_id": record.TaskID, "claimed_by": record.ClaimedBy, "worktree": record.Worktree, "claimed_at": record.ClaimedAt.UTC().Format(time.RFC3339Nano)})
+	} else {
+		fmt.Fprintf(a.Stdout, "task_id: %s claimed_by: %s worktree: %s\n", record.TaskID, record.ClaimedBy, record.Worktree)
+	}
+	return ExitOK, nil
+}
+
+// claimTask 是 CLI 与 MCP 共用的认领/释放逻辑：只允许任务当前执行相关方
+// 认领，同一任务同一时刻只有一个认领者。
+func (a *App) claimTask(ctx context.Context, taskID, actor, worktree string, release bool) (taskWorktree, error) {
+	registry := newWorktreeRegistry(a.Root)
+	if release {
+		return taskWorktree{}, registry.Release(ctx, taskID, actor)
+	}
+	snapshot, err := a.Query.Snapshot(ctx, taskID, 0)
+	if err != nil {
+		return taskWorktree{}, err
+	}
+	switch snapshot.State.Status {
+	case protocol.Assigned, protocol.Working, protocol.RevisionRequired:
+	default:
+		return taskWorktree{}, fmt.Errorf("task %s cannot be claimed in status %s", taskID, snapshot.State.Status)
+	}
+	if actor != snapshot.State.AssignedClient && actor != snapshot.State.ResponsibleClient {
+		return taskWorktree{}, fmt.Errorf("actor %s is not the assigned or responsible client", actor)
+	}
+	return registry.Claim(ctx, taskID, actor, worktree, a.now())
 }
 
 func (a *App) messageAdd(ctx context.Context, args []string, jsonOutput bool) (int, error) {

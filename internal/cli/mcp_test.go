@@ -36,8 +36,8 @@ func TestMCPStdioTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 11 {
-		t.Fatalf("stdio MCP tool count = %d, want 11", len(tools.Tools))
+	if len(tools.Tools) != 12 {
+		t.Fatalf("stdio MCP tool count = %d, want 12", len(tools.Tools))
 	}
 }
 

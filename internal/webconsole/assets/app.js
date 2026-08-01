@@ -632,6 +632,7 @@
     setText("task-event", `#${view.state.last_event_id}`);
     setText("task-updated", formatTime(view.state.updated_at));
     setText("task-final-review", finalReviewLabel(view.project.final_review));
+    setText("task-worktree", view.worktree ? `${view.worktree.worktree}（认领：${clientName(view.worktree.claimed_by) || view.worktree.claimed_by}）` : "未认领");
     setText("task-objective", view.task.objective, "未提供目标。");
 
     const acceptance = byID("acceptance-list");

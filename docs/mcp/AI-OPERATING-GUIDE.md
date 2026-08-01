@@ -43,10 +43,14 @@ Evidence 和事件才是中枢事实。
 
 1. 调用 `collab_generate_handoff`。系统自动选择目标客户端、Binding 和事件游标。
 2. 阅读返回的 `handoff.md`、Manifest 和候选模板。
-3. 在真实项目目录完成工作并运行真实测试。
-4. 按模板产生候选响应，Evidence 应包含简短说明和真实的相对文件引用。
-5. 调用 `collab_submit_candidate`。该工具会保存回执、校验版本和权限，再决定是否写入 Journal。
-6. 若回执为 `REJECTED`，先修正原因；若为 `UNKNOWN`，调用 `collab_list_submissions` 和
+3. 如果有多个客户端可能并行工作，先调用 `collab_task_claim` 认领任务的独立工作区
+   （`worktree` 必须是真实存在的绝对目录，例如 `git worktree` 或独立副本），并确保
+   后续所有修改只发生在这个目录；同一个任务同时只能有一个认领者。任务结束后调用
+   `collab_task_claim` 并传 `release: true` 释放。
+4. 在已认领的工作区（或未认领时的项目 Binding 目录）完成工作并运行真实测试。
+5. 按模板产生候选响应，Evidence 应包含简短说明和真实的相对文件引用。
+6. 调用 `collab_submit_candidate`。该工具会保存回执、校验版本和权限，再决定是否写入 Journal。
+7. 若回执为 `REJECTED`，先修正原因；若为 `UNKNOWN`，调用 `collab_list_submissions` 和
    `collab_get_task` 核对，不要盲目重试。
 
 ## Evidence

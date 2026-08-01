@@ -187,6 +187,14 @@ func (r appConsoleReader) Task(ctx context.Context, taskID, actor, device string
 			view.Handoffs = append(view.Handoffs, consoleHandoff(record))
 		}
 	}
+	if worktree, ok, worktreeErr := newWorktreeRegistry(r.app.Root).Get(ctx, taskID); worktreeErr == nil && ok {
+		view.Worktree = &webconsole.WorktreeView{
+			TaskID:    worktree.TaskID,
+			ClaimedBy: worktree.ClaimedBy,
+			Worktree:  worktree.Worktree,
+			ClaimedAt: consoleTime(worktree.ClaimedAt),
+		}
+	}
 	return view, nil
 }
 

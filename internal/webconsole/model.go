@@ -56,6 +56,13 @@ type HandoffRecord struct {
 	Reason       string `json:"reason,omitempty"`
 }
 
+type WorktreeView struct {
+	TaskID    string `json:"task_id"`
+	ClaimedBy string `json:"claimed_by"`
+	Worktree  string `json:"worktree"`
+	ClaimedAt string `json:"claimed_at"`
+}
+
 type Client struct {
 	ID           string   `json:"id"`
 	Name         string   `json:"name"`
@@ -167,4 +174,5 @@ type TaskView struct {
 	BindingAvailable  bool            `json:"binding_available"`
 	AvailableBindings int             `json:"available_bindings"`
 	Handoffs          []HandoffRecord `json:"handoffs"`
+	Worktree          *WorktreeView   `json:"worktree,omitempty"`
 }

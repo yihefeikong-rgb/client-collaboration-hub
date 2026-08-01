@@ -438,10 +438,79 @@ func wakeRuleAndPrompt(snapshot store.TaskSnapshot) (*wakeRule, string) {
 		return nil, ""
 	}
 	prompt := rule.Prompt + "\n任务：" + snapshot.Task.ID
+	prompt += taskProgressSummary(snapshot)
 	if supplement != "" {
 		prompt += "\n\n补充消息：" + supplement
 	}
 	return rule, prompt
+}
+
+// taskProgressSummary renders a compact digest of the task journal so a
+// desktop conversation keeps working even when the client's own memory or
+// compaction did not preserve the earlier turns. Event bodies are untrusted
+// data and are flattened and truncated before inclusion.
+func taskProgressSummary(snapshot store.TaskSnapshot) string {
+	const limit = 15
+	events := snapshot.Events
+	if len(events) == 0 {
+		return ""
+	}
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "\n\n任务进展摘要（共 %d 条事件，显示最近 %d 条）：", len(events), min(limit, len(events)))
+	start := 0
+	if len(events) > limit {
+		start = len(events) - limit
+	}
+	for _, event := range events[start:] {
+		fmt.Fprintf(&builder, "\n- %s（%s，%s）", eventTypeLabel(event.Type), event.Actor, event.At.Local().Format("01-02 15:04"))
+		if event.Type == protocol.EventAssigned && event.TargetClient != "" {
+			builder.WriteString(" → " + event.TargetClient)
+		}
+		if body := compactEventBody(event.Body); body != "" {
+			builder.WriteString("：" + body)
+		}
+	}
+	fmt.Fprintf(&builder, "\n当前状态：%s，责任方：%s，版本 v%d", snapshot.State.Status, snapshot.State.ResponsibleClient, snapshot.State.Version)
+	return builder.String()
+}
+
+func eventTypeLabel(eventType protocol.EventType) string {
+	switch eventType {
+	case protocol.EventTaskCreated:
+		return "创建"
+	case protocol.EventAssigned:
+		return "指派"
+	case protocol.EventAccepted:
+		return "接受"
+	case protocol.EventMessageAdded:
+		return "消息"
+	case protocol.EventEvidenceAdded:
+		return "证据"
+	case protocol.EventSubmitted:
+		return "提交"
+	case protocol.EventChangesRequested:
+		return "要求返工"
+	case protocol.EventRevisionStarted:
+		return "返工开始"
+	case protocol.EventApproved:
+		return "批准"
+	case protocol.EventBlocked:
+		return "阻塞"
+	default:
+		return string(eventType)
+	}
+}
+
+func compactEventBody(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return ""
+	}
+	body = strings.Join(strings.Fields(body), " ")
+	if len(body) > 80 {
+		return body[:80] + "…"
+	}
+	return body
 }
 
 func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.TaskSnapshot, prompt, key, deliveryID string) {
@@ -454,6 +523,7 @@ func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.
 			n.allowRetryIfUnchanged(ctx, snapshot, rule)
 		}
 	}()
+	prompt = withWorktreePrompt(ctx, prompt, snapshot, newWorktreeRegistry(n.app.Root))
 	workDir := n.app.Root
 	if binding, err := n.app.Bindings.ReadBinding(ctx, DefaultDeviceID(), snapshot.Project.ID); err == nil {
 		if info, statErr := os.Stat(binding.LocalPath); statErr == nil && info.IsDir() {
@@ -507,6 +577,20 @@ func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.
 		return
 	}
 	fmt.Fprintf(n.app.Stdout, "[watch] %s: %s finished %s\n", time.Now().UTC().Format(time.RFC3339), rule.Client, snapshot.Task.ID)
+}
+
+// withWorktreePrompt appends the claimed worktree to a wake prompt so the
+// desktop client works in the registered isolated directory instead of
+// guessing a location shared with another agent.
+func withWorktreePrompt(ctx context.Context, prompt string, snapshot store.TaskSnapshot, registry *worktreeRegistry) string {
+	if registry == nil {
+		return prompt
+	}
+	worktree, ok, err := registry.Get(ctx, snapshot.Task.ID)
+	if err != nil || !ok {
+		return prompt
+	}
+	return prompt + fmt.Sprintf("\n\n工作区登记：%s（认领者：%s）", worktree.Worktree, worktree.ClaimedBy)
 }
 
 func lastEvent(events []protocol.Event) *protocol.Event {
