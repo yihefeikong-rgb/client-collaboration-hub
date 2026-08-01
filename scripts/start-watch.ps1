@@ -1,6 +1,8 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$Root
+    [string]$Root,
+    [string]$StallTimeout = '4m',
+    [string]$RetryDelay = '60s'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,7 +48,7 @@ $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $stdoutLog = Join-Path $logDir "watch-$stamp.out.log"
 $stderrLog = Join-Path $logDir "watch-$stamp.err.log"
 
-$process = Start-Process -FilePath $executable -ArgumentList 'watch' -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
+$process = Start-Process -FilePath $executable -ArgumentList @('watch', '--stall-timeout', $StallTimeout, '--retry-delay', $RetryDelay) -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
 
 Start-Sleep -Milliseconds 500
 if ($process.HasExited) {

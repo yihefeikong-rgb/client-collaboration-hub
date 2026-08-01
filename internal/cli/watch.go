@@ -24,6 +24,7 @@ import (
 const (
 	defaultWatchInterval = 3 * time.Second
 	wakeStateFileName    = "wake-state.json"
+	ccSessionsFileName   = "cc-sessions.json"
 )
 
 const (
@@ -77,7 +78,8 @@ func messageWakeRuleFor(status protocol.Status, responsible string) *wakeRule {
 }
 
 type wakeState struct {
-	Notified map[string]bool `json:"notified"`
+	Notified map[string]bool      `json:"notified"`
+	WakeAt   map[string]time.Time `json:"wake_at,omitempty"`
 }
 
 // wakeNotifier watches the task journal and launches the responsible client
@@ -92,10 +94,12 @@ type wakeNotifier struct {
 	codexCommand string
 	taskTimeout  time.Duration
 	retryDelay   time.Duration
+	stallTimeout time.Duration
 	statePath    string
 
 	mu         sync.Mutex
 	notified   map[string]bool
+	wakeAt     map[string]time.Time
 	running    map[string]bool
 	retryAfter map[string]time.Time
 }
@@ -109,6 +113,7 @@ func (a *App) watch(ctx context.Context, args []string, jsonOutput bool) (int, e
 	codexCommand := fs.String("codex-command", "codex", "")
 	taskTimeout := fs.Duration("task-timeout", 30*time.Minute, "")
 	retryDelay := fs.Duration("retry-delay", 60*time.Second, "")
+	stallTimeout := fs.Duration("stall-timeout", 4*time.Minute, "")
 	if err := parse(fs, args); err != nil {
 		return ExitValidation, err
 	}
@@ -120,8 +125,10 @@ func (a *App) watch(ctx context.Context, args []string, jsonOutput bool) (int, e
 		codexCommand: *codexCommand,
 		taskTimeout:  *taskTimeout,
 		retryDelay:   *retryDelay,
+		stallTimeout: *stallTimeout,
 		statePath:    filepath.Join(a.Root, "collaboration", ".runtime", wakeStateFileName),
 		notified:     map[string]bool{},
+		wakeAt:       map[string]time.Time{},
 		running:      map[string]bool{},
 		retryAfter:   map[string]time.Time{},
 	}
@@ -165,9 +172,18 @@ func (n *wakeNotifier) scan(ctx context.Context) {
 		}
 		key := fmt.Sprintf("%s|%s|%d", taskID, snapshot.State.Status, snapshot.State.Version)
 		n.mu.Lock()
+		if n.wakeAt == nil {
+			n.wakeAt = map[string]time.Time{}
+		}
 		if n.notified[key] {
-			n.mu.Unlock()
-			continue
+			if wokenAt, tracked := n.wakeAt[key]; tracked && n.app.Clock().Sub(wokenAt) < n.stallTimeout {
+				n.mu.Unlock()
+				continue
+			}
+			// A desktop-owned conversation cannot be waited on directly. Retry only
+			// after its bounded stall window, never on the next scan.
+			delete(n.notified, key)
+			delete(n.wakeAt, key)
 		}
 		if until, exists := n.retryAfter[key]; exists && n.app.Clock().Before(until) {
 			n.mu.Unlock()
@@ -187,11 +203,13 @@ func (n *wakeNotifier) scan(ctx context.Context) {
 		}
 		n.running[rule.Client] = true
 		n.notified[key] = true
+		n.wakeAt[key] = n.app.Clock()
 		n.mu.Unlock()
 		if n.dryRun {
 			fmt.Fprintf(n.app.Stdout, "[watch] %s: WOULD wake %s for %s (%s)\n", time.Now().UTC().Format(time.RFC3339), rule.Client, taskID, snapshot.State.Status)
 			n.mu.Lock()
 			delete(n.running, rule.Client)
+			delete(n.wakeAt, key)
 			n.mu.Unlock()
 			continue
 		}
@@ -224,25 +242,33 @@ func wakeRuleAndPrompt(snapshot store.TaskSnapshot) (*wakeRule, string) {
 }
 
 func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.TaskSnapshot, prompt string) {
+	retryIfUnchanged := true
 	defer func() {
 		n.mu.Lock()
 		delete(n.running, rule.Client)
 		n.mu.Unlock()
-		n.allowRetryIfUnchanged(ctx, snapshot, rule)
+		if retryIfUnchanged {
+			n.allowRetryIfUnchanged(ctx, snapshot, rule)
+		}
 	}()
-	command, args := n.ccCommand, []string{"-p"}
-	if rule.Client == "codex" {
-		command, args = n.codexCommand, []string{"exec", "-p"}
-	}
 	workDir := n.app.Root
 	if binding, err := n.app.Bindings.ReadBinding(ctx, DefaultDeviceID(), snapshot.Project.ID); err == nil {
 		if info, statErr := os.Stat(binding.LocalPath); statErr == nil && info.IsDir() {
 			workDir = binding.LocalPath
 		}
 	}
+	command, args := n.ccCommand, []string{"-p"}
+	switch rule.Client {
+	case "codex":
+		command, args = n.codexCommand, []string{"exec", "-p"}
+	}
 	if rule.Client == "cc-haha" {
 		if err := n.wakeCCHaha(ctx, snapshot, prompt); err != nil {
 			fmt.Fprintf(n.app.Stderr, "[watch] %s: CC-HAHA wake failed for %s: %v\n", time.Now().UTC().Format(time.RFC3339), snapshot.Task.ID, err)
+		} else {
+			// The desktop server owns the turn after acknowledgement. Keep the
+			// marker until the task advances or the bounded stall timeout expires.
+			retryIfUnchanged = false
 		}
 		return
 	}
@@ -307,6 +333,7 @@ func (n *wakeNotifier) allowRetryIfUnchanged(ctx context.Context, snapshot store
 	key := fmt.Sprintf("%s|%s|%d", snapshot.Task.ID, current.State.Status, current.State.Version)
 	n.mu.Lock()
 	delete(n.notified, key)
+	delete(n.wakeAt, key)
 	n.retryAfter[key] = n.app.Clock().Add(n.retryDelay)
 	n.mu.Unlock()
 	fmt.Fprintf(n.app.Stdout, "[watch] %s: %s did not advance %s; will retry in %s\n", time.Now().UTC().Format(time.RFC3339), rule.Client, snapshot.Task.ID, n.retryDelay)
@@ -314,8 +341,55 @@ func (n *wakeNotifier) allowRetryIfUnchanged(ctx context.Context, snapshot store
 
 func (n *wakeNotifier) markNotified(key string) {
 	n.mu.Lock()
+	if n.wakeAt == nil {
+		n.wakeAt = map[string]time.Time{}
+	}
 	n.notified[key] = true
+	n.wakeAt[key] = n.app.Clock()
 	n.mu.Unlock()
+}
+
+// ccSessionID returns the CC-HAHA session persisted for a task, or empty.
+func (n *wakeNotifier) ccSessionID(taskID string) string {
+	data, err := os.ReadFile(filepath.Join(n.app.Root, "collaboration", ".runtime", ccSessionsFileName))
+	if err != nil {
+		return ""
+	}
+	var sessions struct {
+		Sessions map[string]string `json:"sessions"`
+	}
+	if json.Unmarshal(data, &sessions) != nil || sessions.Sessions == nil {
+		return ""
+	}
+	return sessions.Sessions[taskID]
+}
+
+// setCCSessionID persists the task-to-session mapping so follow-up messages
+// resume the same CC-HAHA conversation.
+func (n *wakeNotifier) setCCSessionID(taskID, sessionID string) error {
+	path := filepath.Join(n.app.Root, "collaboration", ".runtime", ccSessionsFileName)
+	state := struct {
+		Sessions map[string]string `json:"sessions"`
+	}{Sessions: map[string]string{}}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &state)
+	}
+	if state.Sessions == nil {
+		state.Sessions = map[string]string{}
+	}
+	state.Sessions[taskID] = sessionID
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	temp := path + ".tmp"
+	if err := os.WriteFile(temp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temp, path)
 }
 
 func (n *wakeNotifier) load() error {
@@ -334,6 +408,9 @@ func (n *wakeNotifier) load() error {
 	if state.Notified != nil {
 		n.notified = state.Notified
 	}
+	if state.WakeAt != nil {
+		n.wakeAt = state.WakeAt
+	}
 	n.mu.Unlock()
 	return nil
 }
@@ -343,9 +420,12 @@ func (n *wakeNotifier) save() error {
 		return nil
 	}
 	n.mu.Lock()
-	state := wakeState{Notified: make(map[string]bool, len(n.notified))}
+	state := wakeState{Notified: make(map[string]bool, len(n.notified)), WakeAt: make(map[string]time.Time, len(n.wakeAt))}
 	for key := range n.notified {
 		state.Notified[key] = true
+	}
+	for key, value := range n.wakeAt {
+		state.WakeAt[key] = value
 	}
 	n.mu.Unlock()
 	data, err := json.Marshal(state)

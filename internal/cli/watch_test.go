@@ -230,6 +230,43 @@ func TestWakeNotifierDryRunMarksOnce(t *testing.T) {
 	}
 }
 
+func TestWakeNotifierKeepsFreshDesktopWakeUntilStallTimeout(t *testing.T) {
+	output := &bytes.Buffer{}
+	app := NewApp(t.TempDir(), output, &bytes.Buffer{}, nil)
+	if err := app.EnsureInitialized(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.RegisterLocalProject(context.Background(), "project-1", "Project", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	assignTask(t, app, "T-WAKE-STALLED")
+	snapshot, err := app.Query.Snapshot(context.Background(), "T-WAKE-STALLED", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := fmt.Sprintf("%s|%s|%d", snapshot.Task.ID, snapshot.State.Status, snapshot.State.Version)
+	notifier := &wakeNotifier{
+		app:          app,
+		dryRun:       true,
+		stallTimeout: time.Minute,
+		statePath:    filepath.Join(t.TempDir(), wakeStateFileName),
+		notified:     map[string]bool{key: true},
+		wakeAt:       map[string]time.Time{key: app.Clock()},
+		running:      map[string]bool{},
+		retryAfter:   map[string]time.Time{},
+	}
+	notifier.scan(context.Background())
+	if strings.Contains(output.String(), "WOULD wake") {
+		t.Fatalf("fresh desktop wake was retried: %s", output.String())
+	}
+
+	notifier.wakeAt[key] = app.Clock().Add(-time.Minute)
+	notifier.scan(context.Background())
+	if !strings.Contains(output.String(), "WOULD wake cc-haha") {
+		t.Fatalf("stalled desktop wake was not retried: %s", output.String())
+	}
+}
+
 func TestWakeNotifierBusyClientIsNotMarked(t *testing.T) {
 	app := NewApp(t.TempDir(), &bytes.Buffer{}, &bytes.Buffer{}, nil)
 	if err := app.EnsureInitialized(context.Background()); err != nil {

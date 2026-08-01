@@ -3,160 +3,193 @@
 package cli
 
 import (
-	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
-	gopty "github.com/aymanbagabas/go-pty"
+	"github.com/gorilla/websocket"
 
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/store"
 )
 
-// resolveCCSidecar finds the CC-HAHA sidecar executable. It never falls back
-// to the official Claude CLI: the sidecar is the only supported CC-HAHA entry.
-func resolveCCSidecar() (string, error) {
-	if explicit := os.Getenv("CC_HAHA_SIDECAR_PATH"); explicit != "" {
-		if info, err := os.Stat(explicit); err == nil && !info.IsDir() {
-			return explicit, nil
-		}
-		return "", fmt.Errorf("CC_HAHA_SIDECAR_PATH %q does not exist", explicit)
-	}
-	candidates := []string{
-		filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "claude-code-desktop", "Claude Code Haha", "resources", "app.asar.unpacked", "src-tauri", "binaries", "claude-sidecar-x86_64-pc-windows-msvc.exe"),
-	}
-	for _, candidate := range candidates {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("CC-HAHA sidecar not found; set CC_HAHA_SIDECAR_PATH")
-}
-
-// wakeCCHaha resumes the task's dedicated CC-HAHA session when it already
-// exists and creates it with the same deterministic session ID on first use.
-// Reusing one session per task keeps follow-up messages in the same
-// conversation instead of starting a fresh context every time.
+// wakeCCHaha wakes CC-HAHA through the desktop app's local server instead of
+// launching a headless CLI directly. The server owns the CLI subprocess, keeps
+// the session alive, and pushes real-time output to the desktop UI, so the
+// human operator sees the agent working instead of a silent background job.
 func (n *wakeNotifier) wakeCCHaha(ctx context.Context, snapshot store.TaskSnapshot, prompt string) error {
-	sidecar, err := resolveCCSidecar()
+	baseURL, err := resolveCCHahaServer()
 	if err != nil {
 		return err
 	}
-	sessionID := ccSessionUUID(snapshot.Task.ID)
-	output, err := n.runCCHaha(ctx, sidecar, snapshot, prompt, "--resume", sessionID)
-	if err == nil {
-		return nil
-	}
-	if !strings.Contains(strings.ToLower(output), "no conversation found") {
+	sessionID, err := n.ensureCCHahaSession(ctx, baseURL, snapshot)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(n.app.Stdout, "[watch] %s: no CC-HAHA session for %s yet; creating %s\n", time.Now().UTC().Format(time.RFC3339), snapshot.Task.ID, sessionID)
-	output, err = n.runCCHaha(ctx, sidecar, snapshot, prompt, "--session-id", sessionID)
-	if err != nil {
-		return fmt.Errorf("create cc-haha session %s: %w (output: %s)", sessionID, err, trimOutput(output))
+	if err := sendCCHahaMessage(ctx, baseURL, sessionID, prompt); err != nil {
+		return fmt.Errorf("send message to cc-haha session %s: %w", sessionID, err)
 	}
+	fmt.Fprintf(n.app.Stdout, "[watch] %s: sent wake message to CC-HAHA for %s (session=%s server=%s)\n", time.Now().UTC().Format(time.RFC3339), snapshot.Task.ID, sessionID, baseURL)
 	return nil
 }
 
-// runCCHaha launches the CC-HAHA sidecar through a Windows ConPTY with the
-// given session flag and waits until the process exits, the task moves
-// forward, or the timeout expires. A real terminal is required by the sidecar
-// CLI; plain pipes hang. Terminal output is captured (and bounded) so the
-// caller can distinguish "session missing" from other failures.
-func (n *wakeNotifier) runCCHaha(ctx context.Context, sidecar string, snapshot store.TaskSnapshot, prompt, sessionFlag, sessionID string) (string, error) {
-	appRoot := filepath.Dir(sidecar)
-	pty, err := gopty.New()
-	if err != nil {
-		return "", fmt.Errorf("create pty: %w", err)
+// ensureCCHahaSession returns the task's dedicated CC-HAHA session. The
+// mapping is persisted so follow-up messages resume the same conversation.
+func (n *wakeNotifier) ensureCCHahaSession(ctx context.Context, baseURL string, snapshot store.TaskSnapshot) (string, error) {
+	if sessionID := n.ccSessionID(snapshot.Task.ID); sessionID != "" {
+		if sessionExists(ctx, baseURL, sessionID) {
+			return sessionID, nil
+		}
+		fmt.Fprintf(n.app.Stdout, "[watch] %s: session %s for %s no longer exists; creating a new one\n", time.Now().UTC().Format(time.RFC3339), sessionID, snapshot.Task.ID)
 	}
-	defer pty.Close()
-	conPTY, ok := pty.(gopty.ConPty)
-	if !ok {
-		return "", fmt.Errorf("expected ConPty on windows, got %T", pty)
-	}
-	if err := conPTY.Resize(220, 50); err != nil {
-		return "", fmt.Errorf("resize pty: %w", err)
-	}
-
 	workDir := n.app.Root
 	if binding, bindingErr := n.app.Bindings.ReadBinding(ctx, DefaultDeviceID(), snapshot.Project.ID); bindingErr == nil {
 		if info, statErr := os.Stat(binding.LocalPath); statErr == nil && info.IsDir() {
 			workDir = binding.LocalPath
 		}
 	}
-	cmd := conPTY.Command(sidecar, "cli", "--app-root", appRoot, "--permission-mode", "bypassPermissions", "-p", sessionFlag, sessionID, "--", prompt)
-	cmd.Dir = workDir
-	cmd.Env = os.Environ()
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start sidecar: %w", err)
+	body, _ := json.Marshal(map[string]any{
+		"workDir":        workDir,
+		"permissionMode": "bypassPermissions",
+	})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/sessions", bytes.NewReader(body))
+	if err != nil {
+		return "", err
 	}
-	fmt.Fprintf(n.app.Stdout, "[watch] %s: CC-HAHA sidecar started for %s (session=%s pid=%d)\n", time.Now().UTC().Format(time.RFC3339), snapshot.Task.ID, sessionID, cmd.Process.Pid)
-
-	// Drain the PTY so the sidecar never blocks on output; keep a bounded
-	// tail of the terminal rendering for failure diagnosis.
-	var outputMu sync.Mutex
-	var output strings.Builder
-	go func() {
-		scanner := bufio.NewScanner(pty)
-		scanner.Buffer(make([]byte, 1<<20), 1<<20)
-		for scanner.Scan() {
-			outputMu.Lock()
-			if output.Len() < 512<<10 {
-				output.WriteString(scanner.Text())
-				output.WriteByte('\n')
-			}
-			outputMu.Unlock()
-		}
-	}()
-
-	waitDone := make(chan error, 1)
-	go func() {
-		waitDone <- cmd.Wait()
-	}()
-
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	timeout := time.NewTimer(n.taskTimeout)
-	defer timeout.Stop()
-	for {
-		select {
-		case waitErr := <-waitDone:
-			outputMu.Lock()
-			captured := output.String()
-			outputMu.Unlock()
-			return captured, waitErr
-		case <-ticker.C:
-			current, queryErr := n.app.Query.Snapshot(ctx, snapshot.Task.ID, 0)
-			if queryErr == nil && (current.State.Status != snapshot.State.Status || current.State.Version != snapshot.State.Version) {
-				_ = cmd.Process.Kill()
-				outputMu.Lock()
-				captured := output.String()
-				outputMu.Unlock()
-				return captured, nil
-			}
-		case <-timeout.C:
-			_ = cmd.Process.Kill()
-			outputMu.Lock()
-			captured := output.String()
-			outputMu.Unlock()
-			return captured, fmt.Errorf("wake %s timed out after %s", snapshot.Task.ID, n.taskTimeout)
-		case <-ctx.Done():
-			_ = cmd.Process.Kill()
-			outputMu.Lock()
-			captured := output.String()
-			outputMu.Unlock()
-			return captured, ctx.Err()
-		}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("create cc-haha session: %w", err)
 	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
+		return "", fmt.Errorf("create cc-haha session: server returned %d: %s", response.StatusCode, strings.TrimSpace(string(data)))
+	}
+	var created struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
+		return "", fmt.Errorf("decode create session response: %w", err)
+	}
+	if created.SessionID == "" {
+		return "", fmt.Errorf("create session response missing sessionId")
+	}
+	if err := n.setCCSessionID(snapshot.Task.ID, created.SessionID); err != nil {
+		return "", err
+	}
+	return created.SessionID, nil
 }
 
-func trimOutput(output string) string {
-	if len(output) <= 800 {
-		return output
+// sendCCHahaMessage delivers one user message to the session over the server's
+// WebSocket gateway. The server starts or resumes the managed CLI process and
+// streams output to every connected client (including the desktop UI). The
+// connection is closed after the message is accepted; the CLI keeps running
+// because the server owns its lifecycle.
+func sendCCHahaMessage(ctx context.Context, baseURL, sessionID, prompt string) error {
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	wsURL := strings.Replace(baseURL, "http://", "ws://", 1)
+	connection, _, err := dialer.DialContext(ctx, wsURL+"/ws/"+sessionID, nil)
+	if err != nil {
+		return fmt.Errorf("connect websocket: %w", err)
 	}
-	return output[len(output)-800:]
+	defer connection.Close()
+
+	payload, _ := json.Marshal(map[string]any{
+		"type":    "user_message",
+		"content": prompt,
+	})
+	if err := connection.WriteMessage(websocket.TextMessage, payload); err != nil {
+		return fmt.Errorf("write user_message: %w", err)
+	}
+
+	// Wait briefly for the server to acknowledge the turn (status or an
+	// explicit error). The turn itself continues after we disconnect.
+	_ = connection.SetReadDeadline(time.Now().Add(20 * time.Second))
+	acknowledged := false
+	for !acknowledged {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		_, data, err := connection.ReadMessage()
+		if err != nil {
+			return fmt.Errorf("wait for server acknowledgement: %w", err)
+		}
+		var message struct {
+			Type  string `json:"type"`
+			State string `json:"state"`
+			Error string `json:"message"`
+		}
+		if json.Unmarshal(data, &message) != nil {
+			continue
+		}
+		switch message.Type {
+		case "error":
+			return fmt.Errorf("server rejected turn: %s", message.Error)
+		case "status":
+			if message.State == "thinking" {
+				acknowledged = true
+			}
+		}
+	}
+	return nil
+}
+
+// resolveCCHahaServer discovers the CC-HAHA desktop local server. The port is
+// persisted by the desktop app after each start, so we read that first and
+// fall back to probing known ports.
+func resolveCCHahaServer() (string, error) {
+	if explicit := strings.TrimSpace(os.Getenv("CC_HAHA_SERVER_URL")); explicit != "" {
+		return strings.TrimRight(explicit, "/"), nil
+	}
+	candidates := []string{}
+	if home, err := os.UserHomeDir(); err == nil {
+		statePath := filepath.Join(home, ".claude", "desktop-server-state.json")
+		if data, readErr := os.ReadFile(statePath); readErr == nil {
+			var state struct {
+				LastPort int `json:"lastPort"`
+			}
+			if json.Unmarshal(data, &state) == nil && state.LastPort > 0 {
+				candidates = append(candidates, fmt.Sprintf("http://127.0.0.1:%d", state.LastPort))
+			}
+		}
+	}
+	candidates = append(candidates, "http://127.0.0.1:10558", "http://127.0.0.1:10220", "http://127.0.0.1:6906")
+	for _, candidate := range candidates {
+		if ccServerAlive(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("CC-HAHA desktop server not reachable; start the desktop app or set CC_HAHA_SERVER_URL")
+}
+
+func ccServerAlive(baseURL string) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	response, err := client.Get(baseURL + "/api/status")
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	return response.StatusCode == http.StatusOK
+}
+
+func sessionExists(ctx context.Context, baseURL, sessionID string) bool {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/sessions/"+sessionID, nil)
+	if err != nil {
+		return false
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	return response.StatusCode == http.StatusOK
 }
