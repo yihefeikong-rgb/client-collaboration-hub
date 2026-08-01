@@ -111,7 +111,7 @@ func TestInitIsIdempotentAndPreservesGitignore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, line := range []string{"custom-entry", "collaboration/.runtime/", "collaboration/bindings/", "collab.exe"} {
+	for _, line := range []string{"custom-entry", "collaboration/.runtime/", "collaboration/bindings/", "collab.exe", ".reasonix/"} {
 		if strings.Count(string(data), line) != 1 {
 			t.Fatalf("gitignore content = %q", data)
 		}

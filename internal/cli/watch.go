@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,10 +12,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/protocol"
@@ -22,17 +21,20 @@ import (
 )
 
 const (
-	defaultWatchInterval = 3 * time.Second
-	wakeStateFileName    = "wake-state.json"
-	ccSessionsFileName   = "cc-sessions.json"
+	defaultWatchInterval  = 3 * time.Second
+	wakeStateFileName     = "wake-state.json"
+	wakeStateLockFileName = "watch-state.lock"
+	ccSessionsFileName    = "cc-sessions.json"
 )
 
 const (
-	ccExecutionPrompt  = `协作中枢给你分配了任务。请读取 collab://manual/agent-operating-guide 资源，然后调用 collab_get_next_work（client_id 用 cc-haha）找到你的任务，再调用 collab_get_task 读取任务详情和验收标准。按操作指南自主完成：认领任务、生成交接包、实施、运行真实测试、填写候选响应并调用 collab_submit_candidate 提交。完成后简要报告结果。`
-	ccRevisionPrompt   = `协作中枢有任务需要返工。请读取 collab://manual/agent-operating-guide 资源，调用 collab_get_next_work（client_id 用 cc-haha）找到返工任务，读取 REVIEW 反馈和返工要求。按指南重新生成交接包、实施返工并提交候选响应。完成后简要报告结果。`
-	codexReviewPrompt  = `协作中枢有任务进入 REVIEW 需要你审查。请读取 collab://manual/agent-operating-guide 资源，然后调用 collab_get_next_work（client_id 用 codex）找到待审查任务，读取任务详情和 Evidence。按项目终审模式提交审查候选：生成交接包、填写候选响应（request_changes 或 approve）、调用 collab_submit_candidate 提交。完成后报告审查结论。`
-	ccMessagePrompt    = `协作中枢有新的补充消息，需要你继续处理当前任务。请读取 collab://manual/agent-operating-guide 资源，调用 collab_get_next_work（client_id 用 cc-haha）找到你的任务，再调用 collab_get_task 读取任务详情、最新事件和补充消息。结合新信息继续执行：认领任务、生成交接包、实施、运行真实测试、填写候选响应并调用 collab_submit_candidate 提交。完成后简要报告结果。`
-	codexMessagePrompt = `协作中枢有新的补充消息需要你关注。请读取 collab://manual/agent-operating-guide 资源，调用 collab_get_next_work（client_id 用 codex）找到待审查任务，再调用 collab_get_task 读取任务详情、Evidence 和补充消息。结合新信息继续审查，并按项目终审模式提交审查候选。完成后报告结论。`
+	ccExecutionPrompt     = `协作中枢给你分配了任务。请读取 collab://manual/agent-operating-guide 资源，然后调用 collab_get_next_work（client_id 用 cc-haha）找到你的任务，再调用 collab_get_task 读取任务详情和验收标准。按操作指南自主完成：认领任务、生成交接包、实施、运行真实测试、填写候选响应并调用 collab_submit_candidate 提交。完成后简要报告结果。`
+	ccRevisionPrompt      = `协作中枢有任务需要返工。请读取 collab://manual/agent-operating-guide 资源，调用 collab_get_next_work（client_id 用 cc-haha）找到返工任务，读取 REVIEW 反馈和返工要求。按指南重新生成交接包、实施返工并提交候选响应。完成后简要报告结果。`
+	codexReviewPrompt     = `协作中枢有任务进入 REVIEW 需要你审查。请读取 collab://manual/agent-operating-guide 资源，然后调用 collab_get_next_work（client_id 用 codex）找到待审查任务，读取任务详情和 Evidence。按项目终审模式提交审查候选：生成交接包、填写候选响应（request_changes 或 approve）、调用 collab_submit_candidate 提交。完成后报告审查结论。`
+	ccMessagePrompt       = `协作中枢有新的补充消息，需要你继续处理当前任务。请读取 collab://manual/agent-operating-guide 资源，调用 collab_get_next_work（client_id 用 cc-haha）找到你的任务，再调用 collab_get_task 读取任务详情、最新事件和补充消息。结合新信息继续执行：认领任务、生成交接包、实施、运行真实测试、填写候选响应并调用 collab_submit_candidate 提交。完成后简要报告结果。`
+	codexMessagePrompt    = `协作中枢有新的补充消息需要你关注。请读取 collab://manual/agent-operating-guide 资源，调用 collab_get_next_work（client_id 用 codex）找到待审查任务，再调用 collab_get_task 读取任务详情、Evidence 和补充消息。结合新信息继续审查，并按项目终审模式提交审查候选。完成后报告结论。`
+	reasonixReviewPrompt  = `协作中枢有任务进入 REVIEW 需要你审查。你是只读审查员：不得修改项目源码、配置、依赖、Git 状态或发布内容。请读取 collab://manual/agent-operating-guide 资源，调用 collab_get_next_work（client_id 用 reasonix）找到待审查任务，再调用 collab_get_task 读取任务详情、Evidence 和验收标准。只基于实际读取的文件、diff、测试证据给出结论；如需要返工，清楚列出可验证的问题。仅在当前 Reasonix 权限允许时，生成交接包并提交 request_changes 或 approve 的候选响应；最终批准始终由人工完成。`
+	reasonixMessagePrompt = `协作中枢有新的补充消息需要你继续审查。你是只读审查员：不得修改项目源码、配置、依赖、Git 状态或发布内容。请读取 collab://manual/agent-operating-guide 资源，调用 collab_get_next_work（client_id 用 reasonix）找到待审查任务，再调用 collab_get_task 读取最新 Evidence、事件和补充消息。只基于实际证据更新审查结论；仅在当前 Reasonix 权限允许时，生成交接包并提交候选响应，最终批准仍由人工完成。`
 )
 
 // wakeRule maps a task state to the client that should be woken up.
@@ -55,6 +57,9 @@ func wakeRuleFor(status protocol.Status, responsible string) *wakeRule {
 		if responsible == "codex" {
 			return &wakeRule{Client: "codex", Prompt: codexReviewPrompt}
 		}
+		if responsible == "reasonix" {
+			return &wakeRule{Client: "reasonix", Prompt: reasonixReviewPrompt}
+		}
 	}
 	return nil
 }
@@ -73,73 +78,138 @@ func messageWakeRuleFor(status protocol.Status, responsible string) *wakeRule {
 		return &wakeRule{Client: "cc-haha", Prompt: ccMessagePrompt}
 	case "codex":
 		return &wakeRule{Client: "codex", Prompt: codexMessagePrompt}
+	case "reasonix":
+		return &wakeRule{Client: "reasonix", Prompt: reasonixMessagePrompt}
 	}
 	return nil
 }
 
 type wakeState struct {
-	Notified map[string]bool      `json:"notified"`
-	WakeAt   map[string]time.Time `json:"wake_at,omitempty"`
+	Notified      map[string]bool         `json:"notified"`
+	WakeAt        map[string]time.Time    `json:"wake_at,omitempty"`
+	Deliveries    map[string]wakeDelivery `json:"deliveries,omitempty"`
+	DeliveryAudit []wakeDeliveryAudit     `json:"delivery_audit,omitempty"`
 }
 
-// wakeNotifier watches the task journal and launches the responsible client
-// headless when a task needs its next action. It never controls a client: it
-// only starts the client's own CLI with a fixed prompt, and the client decides
-// what to do by reading the hub through MCP.
-type wakeNotifier struct {
-	app          *App
-	interval     time.Duration
-	dryRun       bool
-	ccCommand    string
-	codexCommand string
-	taskTimeout  time.Duration
-	retryDelay   time.Duration
-	stallTimeout time.Duration
-	statePath    string
+type wakeDeliveryStatus string
 
-	mu         sync.Mutex
-	notified   map[string]bool
-	wakeAt     map[string]time.Time
-	running    map[string]bool
-	retryAfter map[string]time.Time
+const (
+	wakeDeliveryPrepared  wakeDeliveryStatus = "prepared"
+	wakeDeliveryAccepted  wakeDeliveryStatus = "accepted"
+	wakeDeliveryUncertain wakeDeliveryStatus = "uncertain"
+	wakeDeliveryResolved  wakeDeliveryStatus = "manually_resolved"
+)
+
+// wakeDelivery is the durable boundary between the task journal and a native
+// desktop conversation. A prepared record is written before any client call;
+// after a crash it is treated as uncertain instead of replaying a turn that
+// may already have reached the desktop client.
+type wakeDelivery struct {
+	ID        string             `json:"id"`
+	TaskID    string             `json:"task_id"`
+	Client    string             `json:"client"`
+	Status    wakeDeliveryStatus `json:"status"`
+	UpdatedAt time.Time          `json:"updated_at"`
+}
+
+type wakeDeliveryResolution string
+
+const (
+	wakeDeliveryResolutionResolved  wakeDeliveryResolution = "resolved"
+	wakeDeliveryResolutionAbandoned wakeDeliveryResolution = "abandoned"
+)
+
+// wakeDeliveryAudit records each human decision that releases an uncertain
+// desktop handoff. It lives beside the delivery state so a retry can never be
+// mistaken for an unreviewed automatic replay.
+type wakeDeliveryAudit struct {
+	DeliveryID string                 `json:"delivery_id"`
+	TaskID     string                 `json:"task_id"`
+	Client     string                 `json:"client"`
+	Resolution wakeDeliveryResolution `json:"resolution"`
+	Actor      string                 `json:"actor"`
+	Note       string                 `json:"note"`
+	At         time.Time              `json:"at"`
+}
+
+// wakeNotifier watches the task journal and wakes the responsible client when a
+// task needs its next action. CC-HAHA and Codex retain their existing command
+// paths; Reasonix uses its authenticated desktop bridge so the turn is visible
+// in the user's native RE conversation.
+type wakeNotifier struct {
+	app                 *App
+	interval            time.Duration
+	dryRun              bool
+	ccCommand           string
+	codexCommand        string
+	reasonixWorkProfile string
+	taskTimeout         time.Duration
+	retryDelay          time.Duration
+	stallTimeout        time.Duration
+	statePath           string
+
+	mu            sync.Mutex
+	saveMu        sync.Mutex
+	notified      map[string]bool
+	wakeAt        map[string]time.Time
+	running       map[string]bool
+	retryAfter    map[string]time.Time
+	deliveries    map[string]wakeDelivery
+	deliveryAudit []wakeDeliveryAudit
 }
 
 func (a *App) watch(ctx context.Context, args []string, jsonOutput bool) (int, error) {
+	if len(args) > 0 && args[0] == "delivery" {
+		return a.watchDelivery(ctx, args[1:], jsonOutput)
+	}
 	fs := newFlagSet("watch")
 	interval := fs.Duration("interval", defaultWatchInterval, "")
 	dryRun := fs.Bool("dry-run", false, "")
 	once := fs.Bool("once", false, "")
 	ccCommand := fs.String("cc-command", "claude", "")
 	codexCommand := fs.String("codex-command", "codex", "")
+	reasonixWorkProfile := fs.String("reasonix-work-profile", reasonixWorkDelivery, "")
 	taskTimeout := fs.Duration("task-timeout", 30*time.Minute, "")
 	retryDelay := fs.Duration("retry-delay", 60*time.Second, "")
 	stallTimeout := fs.Duration("stall-timeout", 4*time.Minute, "")
 	if err := parse(fs, args); err != nil {
 		return ExitValidation, err
 	}
+	normalizedReasonixWorkProfile, err := normalizeReasonixWorkProfile(*reasonixWorkProfile)
+	if err != nil {
+		return ExitValidation, fmt.Errorf("--reasonix-work-profile %w", err)
+	}
 	notifier := &wakeNotifier{
-		app:          a,
-		interval:     *interval,
-		dryRun:       *dryRun,
-		ccCommand:    *ccCommand,
-		codexCommand: *codexCommand,
-		taskTimeout:  *taskTimeout,
-		retryDelay:   *retryDelay,
-		stallTimeout: *stallTimeout,
-		statePath:    filepath.Join(a.Root, "collaboration", ".runtime", wakeStateFileName),
-		notified:     map[string]bool{},
-		wakeAt:       map[string]time.Time{},
-		running:      map[string]bool{},
-		retryAfter:   map[string]time.Time{},
+		app:                 a,
+		interval:            *interval,
+		dryRun:              *dryRun,
+		ccCommand:           *ccCommand,
+		codexCommand:        *codexCommand,
+		reasonixWorkProfile: normalizedReasonixWorkProfile,
+		taskTimeout:         *taskTimeout,
+		retryDelay:          *retryDelay,
+		stallTimeout:        *stallTimeout,
+		statePath:           filepath.Join(a.Root, "collaboration", ".runtime", wakeStateFileName),
+		notified:            map[string]bool{},
+		wakeAt:              map[string]time.Time{},
+		running:             map[string]bool{},
+		retryAfter:          map[string]time.Time{},
+		deliveries:          map[string]wakeDelivery{},
+	}
+	watchCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
+	defer stop()
+	if !notifier.dryRun {
+		stateLock, err := notifier.lockState(watchCtx)
+		if err != nil {
+			return ExitConflict, errors.New("watch state is already in use; stop the running watcher before starting another one")
+		}
+		defer stateLock.Unlock()
 	}
 	if err := notifier.load(); err != nil {
 		return exitCode(err), err
 	}
 	defer notifier.save()
-
-	watchCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
-	defer stop()
-	fmt.Fprintf(a.Stdout, "collab watch started (interval=%s dry_run=%t cc=%s codex=%s)\n", notifier.interval, notifier.dryRun, notifier.ccCommand, notifier.codexCommand)
+	fmt.Fprintf(a.Stdout, "collab watch started (interval=%s dry_run=%t cc=%s codex=%s reasonix=desktop(normal/%s/auto))\n", notifier.interval, notifier.dryRun, notifier.ccCommand, notifier.codexCommand, notifier.reasonixWorkProfile)
 	notifier.scan(watchCtx)
 	if *once {
 		fmt.Fprintln(a.Stdout, "collab watch completed one scan")
@@ -158,6 +228,89 @@ func (a *App) watch(ctx context.Context, args []string, jsonOutput bool) (int, e
 	}
 }
 
+type wakeDeliveryResolutionOutput struct {
+	DeliveryID   string                 `json:"delivery_id"`
+	TaskID       string                 `json:"task_id"`
+	Client       string                 `json:"client"`
+	Resolution   wakeDeliveryResolution `json:"resolution"`
+	Actor        string                 `json:"actor"`
+	Note         string                 `json:"note"`
+	At           time.Time              `json:"at"`
+	RetryAllowed bool                   `json:"retry_allowed"`
+}
+
+// watchDelivery gives a human operator a deliberate release path for an
+// uncertain desktop handoff. It cannot run alongside watch, so a decision is
+// never applied while a delivery is still in flight.
+func (a *App) watchDelivery(ctx context.Context, args []string, jsonOutput bool) (int, error) {
+	if len(args) == 0 {
+		return ExitValidation, errUsage
+	}
+	var resolution wakeDeliveryResolution
+	switch args[0] {
+	case "resolve":
+		resolution = wakeDeliveryResolutionResolved
+	case "abandon":
+		resolution = wakeDeliveryResolutionAbandoned
+	default:
+		return ExitValidation, errUsage
+	}
+	fs := newFlagSet("watch delivery " + string(resolution))
+	deliveryID := fs.String("delivery", "", "")
+	actor := fs.String("actor", "", "")
+	note := fs.String("note", "", "")
+	if err := parse(fs, args[1:]); err != nil {
+		return ExitValidation, err
+	}
+	if err := require("delivery", *deliveryID, "actor", *actor, "note", *note); err != nil || !protocol.IsValidID(*actor) || len(strings.TrimSpace(*note)) > 512 {
+		return ExitValidation, errUsage
+	}
+
+	notifier := &wakeNotifier{
+		app:           a,
+		statePath:     filepath.Join(a.Root, "collaboration", ".runtime", wakeStateFileName),
+		notified:      map[string]bool{},
+		wakeAt:        map[string]time.Time{},
+		running:       map[string]bool{},
+		retryAfter:    map[string]time.Time{},
+		deliveries:    map[string]wakeDelivery{},
+		deliveryAudit: []wakeDeliveryAudit{},
+	}
+	lockCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	stateLock, err := notifier.lockState(lockCtx)
+	if err != nil {
+		return ExitConflict, errors.New("watch is running; stop it before resolving a desktop delivery")
+	}
+	defer stateLock.Unlock()
+	if err := notifier.load(); err != nil {
+		return exitCode(err), err
+	}
+	audit, err := notifier.resolveUncertainDelivery(*deliveryID, resolution, *actor, *note)
+	if err != nil {
+		return ExitValidation, err
+	}
+	if err := notifier.save(); err != nil {
+		return exitCode(err), err
+	}
+	output := wakeDeliveryResolutionOutput{
+		DeliveryID:   audit.DeliveryID,
+		TaskID:       audit.TaskID,
+		Client:       audit.Client,
+		Resolution:   audit.Resolution,
+		Actor:        audit.Actor,
+		Note:         audit.Note,
+		At:           audit.At,
+		RetryAllowed: audit.Resolution == wakeDeliveryResolutionAbandoned,
+	}
+	if jsonOutput {
+		a.writeJSON(output)
+	} else {
+		fmt.Fprintf(a.Stdout, "delivery_id: %s\ntask_id: %s\nclient: %s\nresolution: %s\nactor: %s\nretry_allowed: %t\n", output.DeliveryID, output.TaskID, output.Client, output.Resolution, output.Actor, output.RetryAllowed)
+	}
+	return ExitOK, nil
+}
+
 func (n *wakeNotifier) scan(ctx context.Context) {
 	taskIDs, err := n.app.Journal.ListTaskIDs(ctx)
 	if err != nil {
@@ -170,10 +323,34 @@ func (n *wakeNotifier) scan(ctx context.Context) {
 			fmt.Fprintf(n.app.Stderr, "[watch] read task %s: %v\n", taskID, err)
 			continue
 		}
-		key := fmt.Sprintf("%s|%s|%d", taskID, snapshot.State.Status, snapshot.State.Version)
+		key := wakeKey(snapshot)
+		rule, prompt := wakeRuleAndPrompt(snapshot)
+		if rule == nil {
+			n.markNotified(key)
+			continue
+		}
 		n.mu.Lock()
 		if n.wakeAt == nil {
 			n.wakeAt = map[string]time.Time{}
+		}
+		if n.deliveries == nil {
+			n.deliveries = map[string]wakeDelivery{}
+		}
+		if delivery, exists := n.deliveries[key]; exists {
+			if delivery.Status == wakeDeliveryPrepared && !n.running[delivery.Client] {
+				delivery.Status = wakeDeliveryUncertain
+				delivery.UpdatedAt = n.app.Clock()
+				n.deliveries[key] = delivery
+			}
+			// A prepared record survived a process interruption, or the desktop
+			// client explicitly left the result uncertain. Replaying could create
+			// a second user turn, so hold this task for visible/manual resolution.
+			n.notified[key] = true
+			if _, tracked := n.wakeAt[key]; !tracked {
+				n.wakeAt[key] = delivery.UpdatedAt
+			}
+			n.mu.Unlock()
+			continue
 		}
 		if n.notified[key] {
 			if wokenAt, tracked := n.wakeAt[key]; tracked && n.app.Clock().Sub(wokenAt) < n.stallTimeout {
@@ -189,13 +366,6 @@ func (n *wakeNotifier) scan(ctx context.Context) {
 			n.mu.Unlock()
 			continue
 		}
-		n.mu.Unlock()
-		rule, prompt := wakeRuleAndPrompt(snapshot)
-		if rule == nil {
-			n.markNotified(key)
-			continue
-		}
-		n.mu.Lock()
 		if n.running[rule.Client] {
 			n.mu.Unlock()
 			fmt.Fprintf(n.app.Stdout, "[watch] %s: %s busy, will re-check %s later\n", time.Now().UTC().Format(time.RFC3339), rule.Client, taskID)
@@ -204,18 +374,44 @@ func (n *wakeNotifier) scan(ctx context.Context) {
 		n.running[rule.Client] = true
 		n.notified[key] = true
 		n.wakeAt[key] = n.app.Clock()
+		var delivery wakeDelivery
+		if usesReliableDesktopDelivery(rule.Client) {
+			delivery = wakeDelivery{
+				ID:        wakeDeliveryID(key, rule.Client),
+				TaskID:    snapshot.Task.ID,
+				Client:    rule.Client,
+				Status:    wakeDeliveryPrepared,
+				UpdatedAt: n.app.Clock(),
+			}
+			n.deliveries[key] = delivery
+		}
 		n.mu.Unlock()
 		if n.dryRun {
 			fmt.Fprintf(n.app.Stdout, "[watch] %s: WOULD wake %s for %s (%s)\n", time.Now().UTC().Format(time.RFC3339), rule.Client, taskID, snapshot.State.Status)
 			n.mu.Lock()
 			delete(n.running, rule.Client)
 			delete(n.wakeAt, key)
+			delete(n.deliveries, key)
 			n.mu.Unlock()
 			continue
 		}
-		go n.wake(ctx, rule, snapshot, prompt)
+		if usesReliableDesktopDelivery(rule.Client) {
+			if err := n.save(); err != nil {
+				n.mu.Lock()
+				delete(n.running, rule.Client)
+				delete(n.notified, key)
+				delete(n.wakeAt, key)
+				delete(n.deliveries, key)
+				n.mu.Unlock()
+				fmt.Fprintf(n.app.Stderr, "[watch] persist delivery %s for %s: %v\n", delivery.ID, snapshot.Task.ID, err)
+				continue
+			}
+		}
+		go n.wake(ctx, rule, snapshot, prompt, key, delivery.ID)
 	}
-	n.save()
+	if err := n.save(); err != nil {
+		fmt.Fprintf(n.app.Stderr, "[watch] persist wake state: %v\n", err)
+	}
 }
 
 // wakeRuleAndPrompt decides whether a snapshot needs a wake and what prompt
@@ -241,7 +437,7 @@ func wakeRuleAndPrompt(snapshot store.TaskSnapshot) (*wakeRule, string) {
 	return rule, prompt
 }
 
-func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.TaskSnapshot, prompt string) {
+func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.TaskSnapshot, prompt, key, deliveryID string) {
 	retryIfUnchanged := true
 	defer func() {
 		n.mu.Lock()
@@ -257,28 +453,43 @@ func (n *wakeNotifier) wake(ctx context.Context, rule *wakeRule, snapshot store.
 			workDir = binding.LocalPath
 		}
 	}
-	command, args := n.ccCommand, []string{"-p"}
-	switch rule.Client {
-	case "codex":
-		command, args = n.codexCommand, []string{"exec", "-p"}
-	}
 	if rule.Client == "cc-haha" {
-		if err := n.wakeCCHaha(ctx, snapshot, prompt); err != nil {
+		if err := n.wakeCCHaha(ctx, snapshot, prompt, deliveryID); err != nil {
 			fmt.Fprintf(n.app.Stderr, "[watch] %s: CC-HAHA wake failed for %s: %v\n", time.Now().UTC().Format(time.RFC3339), snapshot.Task.ID, err)
+			if isUncertainDelivery(err) {
+				n.markDelivery(key, wakeDeliveryUncertain)
+				retryIfUnchanged = false
+				fmt.Fprintf(n.app.Stderr, "[watch] %s: CC-HAHA delivery %s for %s is unconfirmed; verify the visible session before manually resolving it\n", time.Now().UTC().Format(time.RFC3339), deliveryID, snapshot.Task.ID)
+			}
 		} else {
-			// The desktop server owns the turn after acknowledgement. Keep the
-			// marker until the task advances or the bounded stall timeout expires.
+			n.markDelivery(key, wakeDeliveryAccepted)
 			retryIfUnchanged = false
 		}
 		return
 	}
+	if rule.Client == "reasonix" {
+		if err := n.wakeReasonixDesktop(ctx, snapshot.Task.ID, workDir, prompt, deliveryID); err != nil {
+			fmt.Fprintf(n.app.Stderr, "[watch] %s: Reasonix desktop wake failed for %s: %v\n", time.Now().UTC().Format(time.RFC3339), snapshot.Task.ID, err)
+			if isUncertainDelivery(err) {
+				n.markDelivery(key, wakeDeliveryUncertain)
+				retryIfUnchanged = false
+				fmt.Fprintf(n.app.Stderr, "[watch] %s: Reasonix delivery %s for %s is unconfirmed; verify the visible conversation before manually resolving it\n", time.Now().UTC().Format(time.RFC3339), deliveryID, snapshot.Task.ID)
+			}
+		} else {
+			n.markDelivery(key, wakeDeliveryAccepted)
+			retryIfUnchanged = false
+			fmt.Fprintf(n.app.Stdout, "[watch] %s: sent %s to the visible Reasonix conversation\n", time.Now().UTC().Format(time.RFC3339), snapshot.Task.ID)
+		}
+		return
+	}
+	command, args := n.codexCommand, []string{"exec", "-p"}
+	env := os.Environ()
 	cmd := exec.Command(command, append(args, prompt)...)
 	cmd.Dir = workDir
+	cmd.Env = env
 	cmd.Stdout = n.app.Stdout
 	cmd.Stderr = n.app.Stderr
-	if runtime.GOOS == "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000} // CREATE_NO_WINDOW
-	}
+	hideWatchCommandWindow(cmd)
 	fmt.Fprintf(n.app.Stdout, "[watch] %s: wake %s for %s (cwd=%s)\n", time.Now().UTC().Format(time.RFC3339), rule.Client, snapshot.Task.ID, workDir)
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(n.app.Stderr, "[watch] %s: failed to start %s for %s: %v\n", time.Now().UTC().Format(time.RFC3339), command, snapshot.Task.ID, err)
@@ -316,6 +527,145 @@ func ccSessionUUID(taskID string) string {
 		sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
 }
 
+func wakeKey(snapshot store.TaskSnapshot) string {
+	return fmt.Sprintf("%s|%s|%d", snapshot.Task.ID, snapshot.State.Status, snapshot.State.Version)
+}
+
+func usesReliableDesktopDelivery(client string) bool {
+	return client == "cc-haha" || client == "reasonix"
+}
+
+// wakeDeliveryID is stable for one task-state transition and target client.
+// Retrying the same handoff therefore carries the same idempotency key to the
+// desktop client instead of creating another visible user message.
+func wakeDeliveryID(key, client string) string {
+	sum := sha256.Sum256([]byte("collab-wake-v1\x00" + client + "\x00" + key))
+	return "delivery-" + fmt.Sprintf("%x", sum[:16])
+}
+
+type uncertainDeliveryError struct{ err error }
+
+func (e *uncertainDeliveryError) Error() string { return e.err.Error() }
+func (e *uncertainDeliveryError) Unwrap() error { return e.err }
+
+func uncertainDelivery(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &uncertainDeliveryError{err: err}
+}
+
+func isUncertainDelivery(err error) bool {
+	var uncertain *uncertainDeliveryError
+	return errors.As(err, &uncertain)
+}
+
+func unsupportedCCHahaDesktopDelivery() error {
+	return uncertainDelivery(errors.New("CC-HAHA desktop delivery is unsupported on this platform because no matching delivery acknowledgement is available"))
+}
+
+func validateCCHahaDeliveryAck(deliveryID, acknowledgedID, state string) error {
+	if acknowledgedID != deliveryID {
+		return uncertainDelivery(errors.New("CC-HAHA acknowledged a different delivery"))
+	}
+	if state != "accepted" {
+		return uncertainDelivery(fmt.Errorf("CC-HAHA delivery is %s", state))
+	}
+	return nil
+}
+
+func (n *wakeNotifier) markDelivery(key string, status wakeDeliveryStatus) {
+	n.mu.Lock()
+	delivery, ok := n.deliveries[key]
+	if ok {
+		delivery.Status = status
+		delivery.UpdatedAt = n.app.Clock()
+		n.deliveries[key] = delivery
+	}
+	n.mu.Unlock()
+	if err := n.save(); err != nil {
+		fmt.Fprintf(n.app.Stderr, "[watch] persist delivery %s: %v\n", key, err)
+	}
+}
+
+func (n *wakeNotifier) resolveUncertainDelivery(deliveryID string, resolution wakeDeliveryResolution, actor, note string) (wakeDeliveryAudit, error) {
+	deliveryID = strings.TrimSpace(deliveryID)
+	actor = strings.TrimSpace(actor)
+	note = strings.TrimSpace(note)
+	if deliveryID == "" || !protocol.IsValidID(actor) || note == "" || len(note) > 512 {
+		return wakeDeliveryAudit{}, errors.New("delivery resolution requires a delivery, valid actor, and note")
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.ensureStateMapsLocked()
+	var key string
+	var delivery wakeDelivery
+	for candidateKey, candidate := range n.deliveries {
+		if candidate.ID != deliveryID {
+			continue
+		}
+		if key != "" {
+			return wakeDeliveryAudit{}, errors.New("delivery id is ambiguous")
+		}
+		key, delivery = candidateKey, candidate
+	}
+	if key == "" {
+		return wakeDeliveryAudit{}, errors.New("delivery is not pending manual resolution")
+	}
+	if delivery.Status != wakeDeliveryUncertain {
+		return wakeDeliveryAudit{}, errors.New("only an uncertain delivery can be resolved or abandoned")
+	}
+	audit := wakeDeliveryAudit{
+		DeliveryID: delivery.ID,
+		TaskID:     delivery.TaskID,
+		Client:     delivery.Client,
+		Resolution: resolution,
+		Actor:      actor,
+		Note:       note,
+		At:         n.app.now(),
+	}
+	switch resolution {
+	case wakeDeliveryResolutionResolved:
+		delivery.Status = wakeDeliveryResolved
+		delivery.UpdatedAt = audit.At
+		n.deliveries[key] = delivery
+	case wakeDeliveryResolutionAbandoned:
+		delete(n.deliveries, key)
+		delete(n.notified, key)
+		delete(n.wakeAt, key)
+		delete(n.retryAfter, key)
+	default:
+		return wakeDeliveryAudit{}, errors.New("delivery resolution is invalid")
+	}
+	n.deliveryAudit = append(n.deliveryAudit, audit)
+	return audit, nil
+}
+
+func (n *wakeNotifier) lockState(ctx context.Context) (store.Lock, error) {
+	if strings.TrimSpace(n.statePath) == "" {
+		return nil, errors.New("watch state path is required")
+	}
+	return (store.FlockLocker{}).Lock(ctx, filepath.Join(filepath.Dir(n.statePath), "locks", wakeStateLockFileName))
+}
+
+func (n *wakeNotifier) ensureStateMapsLocked() {
+	if n.notified == nil {
+		n.notified = map[string]bool{}
+	}
+	if n.wakeAt == nil {
+		n.wakeAt = map[string]time.Time{}
+	}
+	if n.running == nil {
+		n.running = map[string]bool{}
+	}
+	if n.retryAfter == nil {
+		n.retryAfter = map[string]time.Time{}
+	}
+	if n.deliveries == nil {
+		n.deliveries = map[string]wakeDelivery{}
+	}
+}
+
 // allowRetryIfUnchanged removes the notified marker when the task is still in
 // the same state after a wake attempt, so a later scan can try again. If the
 // task moved forward, the marker stays and the new state drives the next wake.
@@ -330,12 +680,16 @@ func (n *wakeNotifier) allowRetryIfUnchanged(ctx context.Context, snapshot store
 	if wakeRuleFor(current.State.Status, current.State.ResponsibleClient) == nil {
 		return
 	}
-	key := fmt.Sprintf("%s|%s|%d", snapshot.Task.ID, current.State.Status, current.State.Version)
+	key := wakeKey(current)
 	n.mu.Lock()
 	delete(n.notified, key)
 	delete(n.wakeAt, key)
+	delete(n.deliveries, key)
 	n.retryAfter[key] = n.app.Clock().Add(n.retryDelay)
 	n.mu.Unlock()
+	if err := n.save(); err != nil {
+		fmt.Fprintf(n.app.Stderr, "[watch] persist retry state for %s: %v\n", snapshot.Task.ID, err)
+	}
 	fmt.Fprintf(n.app.Stdout, "[watch] %s: %s did not advance %s; will retry in %s\n", time.Now().UTC().Format(time.RFC3339), rule.Client, snapshot.Task.ID, n.retryDelay)
 }
 
@@ -405,11 +759,25 @@ func (n *wakeNotifier) load() error {
 		return err
 	}
 	n.mu.Lock()
+	n.ensureStateMapsLocked()
 	if state.Notified != nil {
 		n.notified = state.Notified
 	}
 	if state.WakeAt != nil {
 		n.wakeAt = state.WakeAt
+	}
+	if state.Deliveries != nil {
+		n.deliveries = state.Deliveries
+		for key, delivery := range n.deliveries {
+			if delivery.Status == wakeDeliveryPrepared {
+				delivery.Status = wakeDeliveryUncertain
+				delivery.UpdatedAt = n.app.Clock()
+				n.deliveries[key] = delivery
+			}
+		}
+	}
+	if state.DeliveryAudit != nil {
+		n.deliveryAudit = append([]wakeDeliveryAudit(nil), state.DeliveryAudit...)
 	}
 	n.mu.Unlock()
 	return nil
@@ -419,13 +787,24 @@ func (n *wakeNotifier) save() error {
 	if n.dryRun {
 		return nil
 	}
+	n.saveMu.Lock()
+	defer n.saveMu.Unlock()
 	n.mu.Lock()
-	state := wakeState{Notified: make(map[string]bool, len(n.notified)), WakeAt: make(map[string]time.Time, len(n.wakeAt))}
+	n.ensureStateMapsLocked()
+	state := wakeState{
+		Notified:      make(map[string]bool, len(n.notified)),
+		WakeAt:        make(map[string]time.Time, len(n.wakeAt)),
+		Deliveries:    make(map[string]wakeDelivery, len(n.deliveries)),
+		DeliveryAudit: append([]wakeDeliveryAudit(nil), n.deliveryAudit...),
+	}
 	for key := range n.notified {
 		state.Notified[key] = true
 	}
 	for key, value := range n.wakeAt {
 		state.WakeAt[key] = value
+	}
+	for key, value := range n.deliveries {
+		state.Deliveries[key] = value
 	}
 	n.mu.Unlock()
 	data, err := json.Marshal(state)

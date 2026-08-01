@@ -2,7 +2,10 @@ collaboration/
 reports/
 collab.exe
 collab-new.exe
+collab
+collab-audit.exe
 .worktrees/
+.reasonix/
 *.log
 *.bak
 *.fixbak

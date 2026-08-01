@@ -66,6 +66,15 @@ tool_timeout_sec = 60
 claude mcp add --scope user client-collaboration-hub -- "D:\path\to\collab.exe" mcp
 ```
 
+**Reasonix（RE）**（`%APPDATA%\reasonix\config.toml`）：
+
+```toml
+[[plugins]]
+name = "client-collaboration-hub"
+command = 'D:\path\to\collab.exe'
+args = ["mcp"]
+```
+
 客户端连接后，先读取 `collab://manual/agent-operating-guide`，再开始调用工具。完整说明见 [docs/mcp/AI-OPERATING-GUIDE.md](docs/mcp/AI-OPERATING-GUIDE.md)。
 
 ### 5. 第一个任务
@@ -79,9 +88,17 @@ claude mcp add --scope user client-collaboration-hub -- "D:\path\to\collab.exe" 
 
 ### 6. 启动唤醒服务（可选）
 
-`collab watch` 会持续监视任务状态，并在任务需要推进时自动唤醒负责的 AI 客户端（CC-HAHA 或 Codex），方便电脑重启后快速恢复无人值守协作。
+`collab watch` 会持续监视任务状态，并在任务需要推进时自动唤醒负责的 AI 客户端（CC-HAHA、Codex 或 Reasonix），方便电脑重启后快速恢复协作。
 
-唤醒采用“一个任务固定一个 CC-HAHA 会话”的机制：首次唤醒时用确定性会话 ID 创建会话，之后的返工或补充消息都会恢复同一个会话继续对话，不会每次重新开一个空白上下文。在网页控制台给任务发送补充消息后，watch 会自动唤醒负责客户端并把消息带进同一会话；唤醒失败会自动退避重试（默认 60 秒）。
+唤醒采用“一个任务固定一个 CC-HAHA 会话”的机制：首次唤醒时用确定性会话 ID 创建会话，之后的返工或补充消息都会恢复同一个会话继续对话，不会每次重新开一个空白上下文。在网页控制台给任务发送补充消息后，watch 会自动唤醒负责客户端并把消息带进同一会话；能够确认未投递的唤醒失败会自动退避重试（默认 60 秒）。
+
+Reasonix 作为 `reasonix` 审查客户端时，需要运行带“桌面协作桥”的 RE 桌面版。`collab watch` 不会启动后台 RE CLI：它会发现 `%APPDATA%\reasonix\desktop-collaboration-bridge.json`，先核对 RE 进程、协议主版本和必需能力，再按“工作区 + 任务 ID”确定性地创建或续接同一个 RE 话题，并通过 RE 自己的用户消息提交路径发送审核请求，因此该消息和后续回复会立即出现在前台对话中。任何不兼容或不可用状态都不会发送 turn，也绝不回退为不可见的后台 CLI 会话。正式运行固定默认“常规执行 / 交付工作模式 / 自动审批”；若需联调 RE，可显式使用 `--reasonix-work-profile balanced`，仅允许 `balanced` 或 `delivery`，桥接回执必须确认同一工作模式。RE 原生的自动上下文压缩继续负责长对话总结。创建任务时指定 `--reviewer reasonix` 即可让 `REVIEW` 阶段唤醒它；最终批准与要求返工仍由人工网页完成。协议字段与失败边界见 [desktop-collaboration-bridge/v1](docs/specs/desktop-collaboration-bridge-v1.md)；只读检查可运行 `collab adapter doctor --client reasonix`（或 `--client all`，不会调用 CC 的旧接口）。
+
+为避免网络中断时重复插入用户消息，桌面投递只有收到同一 `delivery_id` 的明确回执才视为成功。其他不确定结果会暂停该次投递，并在日志中打印 `delivery_id`，不会自动重投。先停止 watch，再由人工核对前台会话后执行其一：确认已投递用 `collab watch delivery resolve --delivery <id> --actor operator --note "已核对"`；确认未投递、允许下一轮重发用 `collab watch delivery abandon --delivery <id> --actor operator --note "未投递"`。两种决定都会写入本地审计记录。
+
+```powershell
+.\collab.exe watch --reasonix-work-profile balanced
+```
 
 一键后台启动：
 

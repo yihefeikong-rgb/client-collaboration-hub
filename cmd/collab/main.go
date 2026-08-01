@@ -18,9 +18,15 @@ func main() {
 	if workingDirectory, err := os.Getwd(); err == nil {
 		app.WorkingDirectory = workingDirectory
 	}
-	if err := app.EnsureInitialized(context.Background()); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(4)
+	if shouldEnsureInitialized(os.Args[1:]) {
+		if err := app.EnsureInitialized(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(4)
+		}
 	}
 	os.Exit(app.Run(os.Args[1:]))
+}
+
+func shouldEnsureInitialized(args []string) bool {
+	return !cli.IsAdapterDoctorCommand(args)
 }

@@ -23,7 +23,7 @@ func TestEnsureInitializedRegistersDefaultClients(t *testing.T) {
 	if err := app.EnsureInitialized(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"codex", "cc-haha"} {
+	for _, id := range []string{"codex", "cc-haha", "reasonix"} {
 		if !app.Registry.ClientExists(id) {
 			t.Fatalf("default client %q was not registered", id)
 		}

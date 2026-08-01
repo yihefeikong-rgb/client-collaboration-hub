@@ -43,6 +43,8 @@ func (a *App) run(ctx context.Context, args []string, jsonOutput bool) (int, err
 		return ExitOK, nil
 	case len(args) >= 1 && args[0] == "watch":
 		return a.watch(ctx, args[1:], jsonOutput)
+	case matches(args, "adapter", "doctor"):
+		return a.adapterDoctor(ctx, args[2:], jsonOutput)
 	case matches(args, "client", "register"):
 		return a.clientRegister(ctx, args[2:], jsonOutput)
 	case matches(args, "project", "create"):
@@ -170,8 +172,8 @@ func ensureGitignore(path string) error {
 		return err
 	}
 	contents := string(data)
-	missing := make([]string, 0, 3)
-	for _, wanted := range []string{"collaboration/.runtime/", "collaboration/bindings/", "collab.exe"} {
+	missing := make([]string, 0, 4)
+	for _, wanted := range []string{"collaboration/.runtime/", "collaboration/bindings/", "collab.exe", ".reasonix/"} {
 		found := false
 		for _, line := range strings.Split(contents, "\n") {
 			if strings.TrimSpace(line) == wanted {

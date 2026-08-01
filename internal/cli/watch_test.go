@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/protocol"
-	"github.com/yihefeikong-rgb/client-collaboration-hub/internal/store"
 )
 
 func TestWakeRuleFor(t *testing.T) {
@@ -23,6 +23,7 @@ func TestWakeRuleFor(t *testing.T) {
 		{protocol.Assigned, "cc-haha", "cc-haha"},
 		{protocol.RevisionRequired, "cc-haha", "cc-haha"},
 		{protocol.Review, "codex", "codex"},
+		{protocol.Review, "reasonix", "reasonix"},
 		{protocol.Assigned, "codex", ""},
 		{protocol.Review, "cc-haha", ""},
 		{protocol.Working, "cc-haha", ""},
@@ -50,6 +51,7 @@ func TestMessageWakeRuleFor(t *testing.T) {
 		{protocol.Working, "cc-haha", "cc-haha"},
 		{protocol.RevisionRequired, "cc-haha", "cc-haha"},
 		{protocol.Review, "codex", "codex"},
+		{protocol.Review, "reasonix", "reasonix"},
 		{protocol.Done, "cc-haha", ""},
 		{protocol.Blocked, "cc-haha", ""},
 		{protocol.Draft, "codex", ""},
@@ -267,6 +269,216 @@ func TestWakeNotifierKeepsFreshDesktopWakeUntilStallTimeout(t *testing.T) {
 	}
 }
 
+func TestWakeNotifierDoesNotReplayUncertainDesktopDelivery(t *testing.T) {
+	output := &bytes.Buffer{}
+	app := NewApp(t.TempDir(), output, &bytes.Buffer{}, nil)
+	if err := app.EnsureInitialized(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.RegisterLocalProject(context.Background(), "project-1", "Project", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	assignTask(t, app, "TASK-UNCERTAIN-42")
+	snapshot, err := app.Query.Snapshot(context.Background(), "TASK-UNCERTAIN-42", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := wakeKey(snapshot)
+	notifier := &wakeNotifier{
+		app:          app,
+		dryRun:       true,
+		stallTimeout: time.Nanosecond,
+		statePath:    filepath.Join(t.TempDir(), wakeStateFileName),
+		notified:     map[string]bool{key: true},
+		wakeAt:       map[string]time.Time{key: app.Clock().Add(-time.Hour)},
+		running:      map[string]bool{},
+		retryAfter:   map[string]time.Time{},
+		deliveries: map[string]wakeDelivery{
+			key: {
+				ID:        wakeDeliveryID(key, "reasonix"),
+				TaskID:    snapshot.Task.ID,
+				Client:    "reasonix",
+				Status:    wakeDeliveryUncertain,
+				UpdatedAt: app.Clock(),
+			},
+		},
+	}
+
+	notifier.scan(context.Background())
+
+	if strings.Contains(output.String(), "WOULD wake") {
+		t.Fatalf("uncertain desktop delivery was replayed: %s", output.String())
+	}
+	if got := notifier.deliveries[key].Status; got != wakeDeliveryUncertain {
+		t.Fatalf("delivery status = %q, want %q", got, wakeDeliveryUncertain)
+	}
+}
+
+func TestCCHahaDeliveryAckRequiresMatchingExplicitAcceptance(t *testing.T) {
+	if err := validateCCHahaDeliveryAck("delivery-42", "delivery-42", "accepted"); err != nil {
+		t.Fatalf("matching accepted acknowledgement = %v", err)
+	}
+	for _, tc := range []struct {
+		name           string
+		acknowledgedID string
+		state          string
+	}{
+		{name: "different delivery", acknowledgedID: "delivery-other", state: "accepted"},
+		{name: "legacy acknowledgement has no id", state: "accepted"},
+		{name: "nonaccepted state", acknowledgedID: "delivery-42", state: "queued"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateCCHahaDeliveryAck("delivery-42", tc.acknowledgedID, tc.state); !isUncertainDelivery(err) {
+				t.Fatalf("acknowledgement error = %v, want uncertain delivery", err)
+			}
+		})
+	}
+}
+
+func TestUnsupportedCCHahaDesktopDeliveryIsUncertain(t *testing.T) {
+	if err := unsupportedCCHahaDesktopDelivery(); !isUncertainDelivery(err) {
+		t.Fatalf("unsupported fallback error = %v, want uncertain delivery", err)
+	}
+}
+
+func TestWatchDeliveryResolutionIsHumanAudited(t *testing.T) {
+	root := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	app := NewApp(root, &stdout, &stderr, func() time.Time { return now })
+	if err := app.EnsureInitialized(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.RegisterLocalProject(context.Background(), "project-1", "Project", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	assignTask(t, app, "TASK-RESOLVE-42")
+	snapshot, err := app.Query.Snapshot(context.Background(), "TASK-RESOLVE-42", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := wakeKey(snapshot)
+	deliveryID := wakeDeliveryID(key, "reasonix")
+	notifier := &wakeNotifier{
+		app:        app,
+		statePath:  filepath.Join(root, "collaboration", ".runtime", wakeStateFileName),
+		notified:   map[string]bool{key: true},
+		wakeAt:     map[string]time.Time{key: now},
+		running:    map[string]bool{},
+		retryAfter: map[string]time.Time{},
+		deliveries: map[string]wakeDelivery{
+			key: {ID: deliveryID, TaskID: snapshot.Task.ID, Client: "reasonix", Status: wakeDeliveryUncertain, UpdatedAt: now},
+		},
+	}
+	if err := notifier.save(); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := app.Run([]string{"--json", "watch", "delivery", "resolve", "--delivery", deliveryID, "--actor", "operator", "--note", "已在 RE 可见对话中核对"}); code != ExitOK {
+		t.Fatalf("resolve code = %d stderr=%s", code, stderr.String())
+	}
+	var resolved wakeDeliveryResolutionOutput
+	if err := json.Unmarshal(stdout.Bytes(), &resolved); err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Resolution != wakeDeliveryResolutionResolved || resolved.RetryAllowed {
+		t.Fatalf("resolve output = %+v", resolved)
+	}
+
+	loaded := &wakeNotifier{app: app, statePath: notifier.statePath}
+	if err := loaded.load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.deliveries[key].Status; got != wakeDeliveryResolved {
+		t.Fatalf("resolved delivery status = %q, want %q", got, wakeDeliveryResolved)
+	}
+	if len(loaded.deliveryAudit) != 1 || loaded.deliveryAudit[0].Actor != "operator" || loaded.deliveryAudit[0].Resolution != wakeDeliveryResolutionResolved {
+		t.Fatalf("resolve audit = %+v", loaded.deliveryAudit)
+	}
+
+	abandonedKey := key + "|retry"
+	abandonedID := wakeDeliveryID(abandonedKey, "reasonix")
+	loaded.mu.Lock()
+	loaded.ensureStateMapsLocked()
+	loaded.deliveries[abandonedKey] = wakeDelivery{ID: abandonedID, TaskID: snapshot.Task.ID, Client: "reasonix", Status: wakeDeliveryUncertain, UpdatedAt: now}
+	loaded.notified[abandonedKey] = true
+	loaded.wakeAt[abandonedKey] = now
+	loaded.mu.Unlock()
+	if err := loaded.save(); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := app.Run([]string{"--json", "watch", "delivery", "abandon", "--delivery", abandonedID, "--actor", "operator", "--note", "已确认未投递，允许重新发送"}); code != ExitOK {
+		t.Fatalf("abandon code = %d stderr=%s", code, stderr.String())
+	}
+	var abandoned wakeDeliveryResolutionOutput
+	if err := json.Unmarshal(stdout.Bytes(), &abandoned); err != nil {
+		t.Fatal(err)
+	}
+	if abandoned.Resolution != wakeDeliveryResolutionAbandoned || !abandoned.RetryAllowed {
+		t.Fatalf("abandon output = %+v", abandoned)
+	}
+	if err := loaded.load(); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := loaded.deliveries[abandonedKey]; exists {
+		t.Fatal("abandoned delivery remained eligible to suppress a human-authorized retry")
+	}
+	if len(loaded.deliveryAudit) != 2 || loaded.deliveryAudit[1].Resolution != wakeDeliveryResolutionAbandoned {
+		t.Fatalf("abandon audit = %+v", loaded.deliveryAudit)
+	}
+}
+
+func TestWakeNotifierKeepsAnInFlightDesktopDeliveryPrepared(t *testing.T) {
+	output := &bytes.Buffer{}
+	app := NewApp(t.TempDir(), output, &bytes.Buffer{}, nil)
+	if err := app.EnsureInitialized(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.RegisterLocalProject(context.Background(), "project-1", "Project", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	assignTask(t, app, "T-WAKE-IN-FLIGHT")
+	snapshot, err := app.Query.Snapshot(context.Background(), "T-WAKE-IN-FLIGHT", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := wakeKey(snapshot)
+	notifier := &wakeNotifier{
+		app:          app,
+		dryRun:       true,
+		stallTimeout: time.Nanosecond,
+		notified:     map[string]bool{key: true},
+		wakeAt:       map[string]time.Time{key: app.Clock()},
+		running:      map[string]bool{"reasonix": true},
+		retryAfter:   map[string]time.Time{},
+		deliveries: map[string]wakeDelivery{
+			key: {
+				ID:        wakeDeliveryID(key, "reasonix"),
+				TaskID:    snapshot.Task.ID,
+				Client:    "reasonix",
+				Status:    wakeDeliveryPrepared,
+				UpdatedAt: app.Clock(),
+			},
+		},
+	}
+	notifier.scan(context.Background())
+	if got := notifier.deliveries[key].Status; got != wakeDeliveryPrepared {
+		t.Fatalf("in-flight delivery status = %q, want %q", got, wakeDeliveryPrepared)
+	}
+}
+
+func TestWakeDeliveryIDIsStablePerTaskStateAndClient(t *testing.T) {
+	key := "TASK-42|ASSIGNED|3"
+	if first, second := wakeDeliveryID(key, "reasonix"), wakeDeliveryID(key, "reasonix"); first != second {
+		t.Fatalf("same delivery ids differ: %q vs %q", first, second)
+	}
+	if wakeDeliveryID(key, "reasonix") == wakeDeliveryID(key, "cc-haha") {
+		t.Fatal("different clients reused a delivery id")
+	}
+}
+
 func TestWakeNotifierBusyClientIsNotMarked(t *testing.T) {
 	app := NewApp(t.TempDir(), &bytes.Buffer{}, &bytes.Buffer{}, nil)
 	if err := app.EnsureInitialized(context.Background()); err != nil {
@@ -300,6 +512,26 @@ func TestWakeNotifierBusyClientIsNotMarked(t *testing.T) {
 	}
 }
 
+func TestWatchReasonixWorkProfileFlag(t *testing.T) {
+	output := &bytes.Buffer{}
+	app := NewApp(t.TempDir(), output, &bytes.Buffer{}, nil)
+	if err := app.EnsureInitialized(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	code, err := app.watch(context.Background(), []string{"--once", "--dry-run", "--reasonix-work-profile", reasonixWorkBalanced}, false)
+	if err != nil || code != ExitOK {
+		t.Fatalf("watch = (%d, %v), want success", code, err)
+	}
+	if !strings.Contains(output.String(), "reasonix=desktop(normal/balanced/auto)") {
+		t.Fatalf("watch output = %q", output.String())
+	}
+
+	code, err = app.watch(context.Background(), []string{"--reasonix-work-profile", "unsupported"}, false)
+	if code != ExitValidation || err == nil || !strings.Contains(err.Error(), "--reasonix-work-profile must be balanced or delivery") {
+		t.Fatalf("invalid profile = (%d, %v), want validation error", code, err)
+	}
+}
+
 func assignTask(t *testing.T, app *App, taskID string) {
 	t.Helper()
 	task := protocol.Task{
@@ -316,8 +548,4 @@ func assignTask(t *testing.T, app *App, taskID string) {
 	if _, err := app.Journal.CommitTransition(context.Background(), taskID, 1, intent, nil); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func wakeKey(snapshot store.TaskSnapshot) string {
-	return fmt.Sprintf("%s|%s|%d", snapshot.Task.ID, snapshot.State.Status, snapshot.State.Version)
 }

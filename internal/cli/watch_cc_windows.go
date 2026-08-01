@@ -23,7 +23,7 @@ import (
 // launching a headless CLI directly. The server owns the CLI subprocess, keeps
 // the session alive, and pushes real-time output to the desktop UI, so the
 // human operator sees the agent working instead of a silent background job.
-func (n *wakeNotifier) wakeCCHaha(ctx context.Context, snapshot store.TaskSnapshot, prompt string) error {
+func (n *wakeNotifier) wakeCCHaha(ctx context.Context, snapshot store.TaskSnapshot, prompt, deliveryID string) error {
 	baseURL, err := resolveCCHahaServer()
 	if err != nil {
 		return err
@@ -32,7 +32,7 @@ func (n *wakeNotifier) wakeCCHaha(ctx context.Context, snapshot store.TaskSnapsh
 	if err != nil {
 		return err
 	}
-	if err := sendCCHahaMessage(ctx, baseURL, sessionID, prompt); err != nil {
+	if err := sendCCHahaMessage(ctx, baseURL, sessionID, prompt, deliveryID); err != nil {
 		return fmt.Errorf("send message to cc-haha session %s: %w", sessionID, err)
 	}
 	fmt.Fprintf(n.app.Stdout, "[watch] %s: sent wake message to CC-HAHA for %s (session=%s server=%s)\n", time.Now().UTC().Format(time.RFC3339), snapshot.Task.ID, sessionID, baseURL)
@@ -92,7 +92,7 @@ func (n *wakeNotifier) ensureCCHahaSession(ctx context.Context, baseURL string, 
 // streams output to every connected client (including the desktop UI). The
 // connection is closed after the message is accepted; the CLI keeps running
 // because the server owns its lifecycle.
-func sendCCHahaMessage(ctx context.Context, baseURL, sessionID, prompt string) error {
+func sendCCHahaMessage(ctx context.Context, baseURL, sessionID, prompt, deliveryID string) error {
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	wsURL := strings.Replace(baseURL, "http://", "ws://", 1)
 	connection, _, err := dialer.DialContext(ctx, wsURL+"/ws/"+sessionID, nil)
@@ -102,45 +102,44 @@ func sendCCHahaMessage(ctx context.Context, baseURL, sessionID, prompt string) e
 	defer connection.Close()
 
 	payload, _ := json.Marshal(map[string]any{
-		"type":    "user_message",
-		"content": prompt,
+		"type":        "user_message",
+		"content":     prompt,
+		"delivery_id": deliveryID,
 	})
 	if err := connection.WriteMessage(websocket.TextMessage, payload); err != nil {
-		return fmt.Errorf("write user_message: %w", err)
+		return uncertainDelivery(fmt.Errorf("write user_message: %w", err))
 	}
 
-	// Wait briefly for the server to acknowledge the turn (status or an
-	// explicit error). The turn itself continues after we disconnect.
+	// A thinking status is emitted before CC has handed the user message to the
+	// managed session, so it is not a receipt. The patched CC server replies
+	// with delivery_ack only after the exact delivery id has been accepted.
 	_ = connection.SetReadDeadline(time.Now().Add(20 * time.Second))
-	acknowledged := false
-	for !acknowledged {
+	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return uncertainDelivery(ctx.Err())
 		default:
 		}
 		_, data, err := connection.ReadMessage()
 		if err != nil {
-			return fmt.Errorf("wait for server acknowledgement: %w", err)
+			return uncertainDelivery(fmt.Errorf("wait for server acknowledgement: %w", err))
 		}
 		var message struct {
-			Type  string `json:"type"`
-			State string `json:"state"`
-			Error string `json:"message"`
+			Type       string `json:"type"`
+			DeliveryID string `json:"delivery_id"`
+			State      string `json:"state"`
+			Error      string `json:"message"`
 		}
 		if json.Unmarshal(data, &message) != nil {
 			continue
 		}
 		switch message.Type {
 		case "error":
-			return fmt.Errorf("server rejected turn: %s", message.Error)
-		case "status":
-			if message.State == "thinking" {
-				acknowledged = true
-			}
+			return uncertainDelivery(fmt.Errorf("server rejected turn: %s", message.Error))
+		case "delivery_ack":
+			return validateCCHahaDeliveryAck(deliveryID, message.DeliveryID, message.State)
 		}
 	}
-	return nil
 }
 
 // resolveCCHahaServer discovers the CC-HAHA desktop local server. The port is
