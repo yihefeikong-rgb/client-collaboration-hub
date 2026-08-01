@@ -59,8 +59,8 @@ func (a *App) EnsureInitialized(ctx context.Context) error {
 	}
 	defaults := []protocol.Client{
 		{ID: "codex", Name: "Codex", Capabilities: []string{"create_task", "review", "import_export"}},
-		{ID: "cc-haha", Name: "CC-HAHA", Capabilities: []string{"execute", "import_export"}},
-		{ID: "reasonix", Name: "Reasonix (RE)", Capabilities: []string{"review", "import_export"}},
+		{ID: "cc-haha", Name: "CC-HAHA", Capabilities: []string{"execute", "create_task", "import_export"}},
+		{ID: "reasonix", Name: "Reasonix (RE)", Capabilities: []string{"review", "create_task", "import_export"}},
 	}
 	for _, client := range defaults {
 		if a.Registry.ClientExists(client.ID) {
