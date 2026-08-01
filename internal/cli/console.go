@@ -260,7 +260,7 @@ func collaborationInitialized(root string) (bool, error) {
 }
 
 func consoleClient(value protocol.Client) webconsole.Client {
-	return webconsole.Client{ID: value.ID, Name: value.Name, Capabilities: append([]string(nil), value.Capabilities...)}
+	return webconsole.Client{ID: value.ID, Name: value.Name, Capabilities: append([]string(nil), value.Capabilities...), Role: value.Role, WorkProfiles: append([]string(nil), value.WorkProfiles...), DefaultProfile: value.DefaultProfile, ApprovalModes: append([]string(nil), value.ApprovalModes...), DefaultApproval: value.DefaultApproval, Models: append([]string(nil), value.Models...), DefaultModel: value.DefaultModel}
 }
 
 func consoleProject(value protocol.Project) webconsole.Project {

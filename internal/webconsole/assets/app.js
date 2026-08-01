@@ -279,7 +279,13 @@
 
   function renderSetup() {
     if (!overview) return;
-    renderDefinitionList("client-list", overview.clients, (client) => [client.name, `${client.id} · ${client.capabilities.join(", ") || "未声明能力"}`]);
+    renderDefinitionList("client-list", overview.clients, (client) => {
+      const role = client.role ? ` · 角色:${client.role}` : "";
+      const profile = client.default_work_profile ? ` · 工作模式:${client.default_work_profile}` : "";
+      const approval = client.default_approval_mode ? ` · 审批:${client.default_approval_mode}` : "";
+      const model = client.default_model ? ` · 模型:${client.default_model}` : "";
+      return [client.name, `${client.id} · ${client.capabilities.join(", ") || "未声明能力"}${role}${profile}${approval}${model}`];
+    });
     renderDefinitionList("project-list", overview.projects, (project) => [project.name, `${project.id}${project.created_at ? ` · ${formatTime(project.created_at)}` : ""}`]);
   }
 

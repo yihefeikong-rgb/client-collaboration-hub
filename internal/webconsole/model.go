@@ -64,9 +64,16 @@ type WorktreeView struct {
 }
 
 type Client struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Capabilities []string `json:"capabilities"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Capabilities    []string `json:"capabilities"`
+	Role            string   `json:"role,omitempty"`
+	WorkProfiles    []string `json:"work_profiles,omitempty"`
+	DefaultProfile  string   `json:"default_work_profile,omitempty"`
+	ApprovalModes   []string `json:"approval_modes,omitempty"`
+	DefaultApproval string   `json:"default_approval_mode,omitempty"`
+	Models          []string `json:"models,omitempty"`
+	DefaultModel    string   `json:"default_model,omitempty"`
 }
 
 type Project struct {

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -177,6 +178,19 @@ func (a *App) watch(ctx context.Context, args []string, jsonOutput bool) (int, e
 	if err := parse(fs, args); err != nil {
 		return ExitValidation, err
 	}
+	explicitFlags := map[string]bool{}
+	fs.Visit(func(flag *flag.Flag) { explicitFlags[flag.Name] = true })
+	// 统一协议层：未显式指定工作模式时，采用客户端注册表的默认声明。
+	if !explicitFlags["cc-work-profile"] {
+		if ccClient, readErr := a.Registry.ReadClient(ctx, "cc-haha"); readErr == nil && ccClient.DefaultProfile != "" {
+			*ccHahahaWorkProfile = resolveClientDefault(*ccHahahaWorkProfile, explicitFlags["cc-work-profile"], ccClient.DefaultProfile)
+		}
+	}
+	if !explicitFlags["reasonix-work-profile"] {
+		if reClient, readErr := a.Registry.ReadClient(ctx, "reasonix"); readErr == nil && reClient.DefaultProfile != "" {
+			*reasonixWorkProfile = resolveClientDefault(*reasonixWorkProfile, explicitFlags["reasonix-work-profile"], reClient.DefaultProfile)
+		}
+	}
 	normalizedReasonixWorkProfile, err := normalizeReasonixWorkProfile(*reasonixWorkProfile)
 	if err != nil {
 		return ExitValidation, fmt.Errorf("--reasonix-work-profile %w", err)
@@ -316,6 +330,16 @@ func (a *App) watchDelivery(ctx context.Context, args []string, jsonOutput bool)
 		fmt.Fprintf(a.Stdout, "delivery_id: %s\ntask_id: %s\nclient: %s\nresolution: %s\nactor: %s\nretry_allowed: %t\n", output.DeliveryID, output.TaskID, output.Client, output.Resolution, output.Actor, output.RetryAllowed)
 	}
 	return ExitOK, nil
+}
+
+// resolveClientDefault applies the unified protocol layer precedence:
+// an explicit CLI flag beats the client registry default, which beats the
+// built-in fallback.
+func resolveClientDefault(value string, explicit bool, registered string) string {
+	if explicit || registered == "" {
+		return value
+	}
+	return registered
 }
 
 func (n *wakeNotifier) scan(ctx context.Context) {

@@ -22,6 +22,7 @@ type RegistryStore interface {
 	CreateProject(context.Context, protocol.Project) error
 	UpdateProjectPolicy(context.Context, string, int64, string, protocol.CollaborationPolicy, time.Time) (protocol.Project, error)
 	RegisterClient(context.Context, protocol.Client) error
+	UpdateClient(context.Context, protocol.Client) error
 	ReadProject(context.Context, string) (protocol.Project, error)
 	ReadClient(context.Context, string) (protocol.Client, error)
 	ProjectExists(string) bool
@@ -113,6 +114,31 @@ func (r *FileRegistryStore) RegisterClient(ctx context.Context, client protocol.
 	}
 	defer lock.Unlock()
 	return r.registerClient(client)
+}
+
+// UpdateClient 覆盖式更新已存在的客户端声明；客户端不存在时返回 NotFound。
+// 用于统一协议层声明（角色、工作模式、审批模式、模型）的维护。
+func (r *FileRegistryStore) UpdateClient(ctx context.Context, client protocol.Client) error {
+	if err := client.Validate(client.ID); err != nil {
+		return err
+	}
+	lock, err := r.Locks.Clients(ctx)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	path := r.clientPath(client.ID)
+	if _, err := r.FS.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: client %q", ErrNotFound, client.ID)
+		}
+		return err
+	}
+	data, err := yaml.Marshal(client)
+	if err != nil {
+		return err
+	}
+	return writeAtomically(r.FS, r.Replacer, path, ".client-*.tmp", append(data, '\n'))
 }
 
 func (r *FileRegistryStore) ReadProject(_ context.Context, id string) (protocol.Project, error) {

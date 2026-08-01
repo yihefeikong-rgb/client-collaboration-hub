@@ -49,3 +49,37 @@ func TestModelRejectsWhitespaceRequiredFields(t *testing.T) {
 		t.Fatal("whitespace task fields accepted")
 	}
 }
+
+func TestClientUnifiedProtocolDeclarations(t *testing.T) {
+	valid := Client{ID: "cc-haha", Name: "CC-HAHA", Capabilities: []string{"execute", "create_task", "import_export"}, Role: "executor", WorkProfiles: []string{"default", "controlled"}, DefaultProfile: "controlled", ApprovalModes: []string{"ask", "auto"}, DefaultApproval: "auto", Models: []string{"deepseek-v4-flash", "deepseek-v4-pro"}, DefaultModel: "deepseek-v4-pro"}
+	if err := valid.Validate("cc-haha"); err != nil {
+		t.Fatalf("valid declaration rejected: %v", err)
+	}
+	if err := (Client{ID: "c", Name: "C", Capabilities: []string{"review"}, Role: "executor"}).Validate("c"); err == nil {
+		t.Fatal("executor role without execute capability accepted")
+	}
+	if err := (Client{ID: "c", Name: "C", Capabilities: []string{"execute"}, Role: "reviewer"}).Validate("c"); err == nil {
+		t.Fatal("reviewer role without review capability accepted")
+	}
+	if err := (Client{ID: "c", Name: "C", Capabilities: []string{"execute", "review"}, Role: "both"}).Validate("c"); err != nil {
+		t.Fatalf("both role with both capabilities rejected: %v", err)
+	}
+	if err := (Client{ID: "c", Name: "C", Capabilities: []string{"review"}, Role: "boss"}).Validate("c"); err == nil {
+		t.Fatal("unknown role accepted")
+	}
+	if err := (Client{ID: "c", Name: "C", Capabilities: []string{"review"}, WorkProfiles: []string{"chaos"}}).Validate("c"); err == nil {
+		t.Fatal("unknown work profile accepted")
+	}
+	if err := (Client{ID: "c", Name: "C", Capabilities: []string{"review"}, ApprovalModes: []string{"nuke"}}).Validate("c"); err == nil {
+		t.Fatal("unknown approval mode accepted")
+	}
+	if err := (Client{ID: "c", Name: "C", Capabilities: []string{"review"}, WorkProfiles: []string{"balanced"}, DefaultProfile: "delivery"}).Validate("c"); err == nil {
+		t.Fatal("default work profile outside list accepted")
+	}
+	if err := (Client{ID: "c", Name: "C", Capabilities: []string{"review"}, Models: []string{"flash"}, DefaultModel: "pro"}).Validate("c"); err == nil {
+		t.Fatal("default model outside list accepted")
+	}
+	if err := (Client{ID: "codex", Name: "Codex", Capabilities: []string{"review"}}).Validate("codex"); err != nil {
+		t.Fatalf("legacy client declaration rejected: %v", err)
+	}
+}

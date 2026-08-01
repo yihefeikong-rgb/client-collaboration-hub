@@ -83,6 +83,14 @@ type Client struct {
 	ID           string   `yaml:"id"`
 	Name         string   `yaml:"name"`
 	Capabilities []string `yaml:"capabilities"`
+	// 统一协议层声明（全部可选，向后兼容）。
+	Role             string   `yaml:"role,omitempty"`                 // executor | reviewer | both
+	WorkProfiles     []string `yaml:"work_profiles,omitempty"`        // 支持的工作模式（default/controlled/balanced/delivery）
+	DefaultProfile   string   `yaml:"default_work_profile,omitempty"` // 未显式指定时使用的默认工作模式
+	ApprovalModes    []string `yaml:"approval_modes,omitempty"`       // 支持的审批模式（ask/auto/yolo）
+	DefaultApproval  string   `yaml:"default_approval_mode,omitempty"`
+	Models           []string `yaml:"models,omitempty"`               // 可用模型档位（信息性）
+	DefaultModel     string   `yaml:"default_model,omitempty"`
 }
 
 type Task struct {
@@ -159,7 +167,74 @@ func (c Client) Validate(expectedID string) error {
 		}
 		seen[capability] = true
 	}
+	if c.Role != "" && c.Role != "executor" && c.Role != "reviewer" && c.Role != "both" {
+		return fmt.Errorf("invalid client role %q", c.Role)
+	}
+	switch c.Role {
+	case "executor":
+		if !c.HasCapability("execute") {
+			return fmt.Errorf("client role executor requires execute capability")
+		}
+	case "reviewer":
+		if !c.HasCapability("review") {
+			return fmt.Errorf("client role reviewer requires review capability")
+		}
+	case "both":
+		if !c.HasCapability("execute") || !c.HasCapability("review") {
+			return fmt.Errorf("client role both requires execute and review capabilities")
+		}
+	}
+	if err := validateStringSet("client work profile", c.WorkProfiles, knownWorkProfile, c.DefaultProfile); err != nil {
+		return err
+	}
+	if err := validateStringSet("client approval mode", c.ApprovalModes, knownApprovalMode, c.DefaultApproval); err != nil {
+		return err
+	}
+	if len(c.Models) > 0 && c.DefaultModel != "" {
+		found := false
+		for _, model := range c.Models {
+			if model == c.DefaultModel {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("client default_model %q is not in models", c.DefaultModel)
+		}
+	}
 	return nil
+}
+
+func validateStringSet(label string, values []string, known func(string) bool, defaultValue string) error {
+	seen := map[string]bool{}
+	for _, value := range values {
+		if !known(value) || seen[value] {
+			return fmt.Errorf("invalid %s %q", label, value)
+		}
+		seen[value] = true
+	}
+	if defaultValue != "" && !seen[defaultValue] {
+		return fmt.Errorf("%s default %q is not in the declared list", label, defaultValue)
+	}
+	return nil
+}
+
+func knownWorkProfile(value string) bool {
+	switch value {
+	case "default", "controlled", "balanced", "delivery":
+		return true
+	default:
+		return false
+	}
+}
+
+func knownApprovalMode(value string) bool {
+	switch value {
+	case "ask", "auto", "yolo":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c Client) HasCapability(capability string) bool {

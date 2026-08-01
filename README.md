@@ -77,6 +77,14 @@ args = ["mcp"]
 
 客户端连接后，先读取 `collab://manual/agent-operating-guide`，再开始调用工具。完整说明见 [docs/mcp/AI-OPERATING-GUIDE.md](docs/mcp/AI-OPERATING-GUIDE.md)。
 
+客户端注册表是统一协议层：每个客户端声明角色（executor/reviewer/both）、支持的工作模式、
+审批模式与模型档位。`collab watch` 未显式传参时采用注册表的默认工作模式，显式参数优先；
+网页控制台的“已登记客户端”列表会展示这些声明。维护声明：
+
+```powershell
+.\collab.exe client register --id reasonix --name "Reasonix (RE)" --capability review --capability create_task --capability import_export --role reviewer --work-profile balanced --work-profile delivery --default-work-profile delivery --approval-mode auto --approval-mode yolo --default-approval-mode auto --update
+```
+
 ### 5. 第一个任务
 
 ```powershell

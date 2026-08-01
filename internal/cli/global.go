@@ -58,9 +58,9 @@ func (a *App) EnsureInitialized(ctx context.Context) error {
 		}
 	}
 	defaults := []protocol.Client{
-		{ID: "codex", Name: "Codex", Capabilities: []string{"create_task", "review", "import_export"}},
-		{ID: "cc-haha", Name: "CC-HAHA", Capabilities: []string{"execute", "create_task", "import_export"}},
-		{ID: "reasonix", Name: "Reasonix (RE)", Capabilities: []string{"review", "create_task", "import_export"}},
+		{ID: "codex", Name: "Codex", Capabilities: []string{"create_task", "review", "import_export"}, Role: "reviewer", ApprovalModes: []string{"auto"}, DefaultApproval: "auto"},
+		{ID: "cc-haha", Name: "CC-HAHA", Capabilities: []string{"execute", "create_task", "import_export"}, Role: "executor", WorkProfiles: []string{"default", "controlled"}, DefaultProfile: "default", ApprovalModes: []string{"ask"}, DefaultApproval: "ask", Models: []string{"deepseek-v4-flash", "deepseek-v4-pro", "glm-5.2"}, DefaultModel: "deepseek-v4-flash"},
+		{ID: "reasonix", Name: "Reasonix (RE)", Capabilities: []string{"review", "create_task", "import_export"}, Role: "reviewer", WorkProfiles: []string{"balanced", "delivery"}, DefaultProfile: "delivery", ApprovalModes: []string{"auto", "yolo"}, DefaultApproval: "auto", Models: []string{"deepseek-v4-flash", "deepseek-v4-pro"}, DefaultModel: "deepseek-v4-flash"},
 	}
 	for _, client := range defaults {
 		if a.Registry.ClientExists(client.ID) {

@@ -39,6 +39,42 @@ func TestRegistryCreatesAndReadsImmutableRecords(t *testing.T) {
 	}
 }
 
+func TestRegistryUpdateClientReplacesDeclarations(t *testing.T) {
+	root := t.TempDir()
+	registry := NewFileRegistryStore(root, FlockLocker{})
+	client := protocol.Client{ID: "reasonix", Name: "Reasonix (RE)", Capabilities: []string{"review", "create_task", "import_export"}}
+	if err := registry.RegisterClient(context.Background(), client); err != nil {
+		t.Fatal(err)
+	}
+	updated := client
+	updated.Role = "reviewer"
+	updated.WorkProfiles = []string{"balanced", "delivery"}
+	updated.DefaultProfile = "delivery"
+	updated.ApprovalModes = []string{"auto", "yolo"}
+	updated.DefaultApproval = "auto"
+	updated.Models = []string{"deepseek-v4-flash", "deepseek-v4-pro"}
+	updated.DefaultModel = "deepseek-v4-flash"
+	if err := registry.UpdateClient(context.Background(), updated); err != nil {
+		t.Fatal(err)
+	}
+	read, err := registry.ReadClient(context.Background(), "reasonix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.Role != "reviewer" || read.DefaultProfile != "delivery" || read.DefaultApproval != "auto" || read.DefaultModel != "deepseek-v4-flash" {
+		t.Fatalf("updated client = %+v", read)
+	}
+	if err := registry.UpdateClient(context.Background(), protocol.Client{ID: "missing", Name: "X", Capabilities: []string{"review"}}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("update missing client error = %v", err)
+	}
+	// 非法声明不允许覆盖写入。
+	bad := updated
+	bad.Role = "boss"
+	if err := registry.UpdateClient(context.Background(), bad); err == nil {
+		t.Fatal("invalid update accepted")
+	}
+}
+
 func TestRegistryRejectsInvalidStoredYAML(t *testing.T) {
 	root := t.TempDir()
 	registry := NewFileRegistryStore(root, FlockLocker{})

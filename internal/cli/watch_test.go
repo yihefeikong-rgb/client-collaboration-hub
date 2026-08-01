@@ -41,6 +41,18 @@ func TestWakeRuleFor(t *testing.T) {
 	}
 }
 
+func TestResolveClientDefaultPrecedence(t *testing.T) {
+	if got := resolveClientDefault("default", true, "delivery"); got != "default" {
+		t.Fatalf("explicit flag precedence = %q", got)
+	}
+	if got := resolveClientDefault("default", false, "delivery"); got != "delivery" {
+		t.Fatalf("registry default precedence = %q", got)
+	}
+	if got := resolveClientDefault("default", false, ""); got != "default" {
+		t.Fatalf("builtin fallback = %q", got)
+	}
+}
+
 func TestMessageWakeRuleFor(t *testing.T) {
 	cases := []struct {
 		status      protocol.Status

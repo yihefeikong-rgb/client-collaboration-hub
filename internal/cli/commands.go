@@ -217,22 +217,40 @@ func ensureGitignore(path string) error {
 func (a *App) clientRegister(ctx context.Context, args []string, jsonOutput bool) (int, error) {
 	fs := newFlagSet("client register")
 	id, name := fs.String("id", "", ""), fs.String("name", "", "")
+	role := fs.String("role", "", "")
+	defaultProfile := fs.String("default-work-profile", "", "")
+	defaultApproval := fs.String("default-approval-mode", "", "")
+	defaultModel := fs.String("default-model", "", "")
+	update := fs.Bool("update", false, "")
 	var capabilities stringList
 	fs.Var(&capabilities, "capability", "")
+	var workProfiles stringList
+	fs.Var(&workProfiles, "work-profile", "")
+	var approvalModes stringList
+	fs.Var(&approvalModes, "approval-mode", "")
+	var models stringList
+	fs.Var(&models, "model", "")
 	if err := parse(fs, args); err != nil {
 		return ExitValidation, err
 	}
 	if err := require("id", *id, "name", *name); err != nil || len(capabilities) == 0 {
 		return ExitValidation, errUsage
 	}
-	client := protocol.Client{ID: *id, Name: *name, Capabilities: capabilities}
-	if err := a.Registry.RegisterClient(ctx, client); err != nil {
+	client := protocol.Client{ID: *id, Name: *name, Capabilities: capabilities, Role: *role, WorkProfiles: workProfiles, DefaultProfile: *defaultProfile, ApprovalModes: approvalModes, DefaultApproval: *defaultApproval, Models: models, DefaultModel: *defaultModel}
+	err := a.Registry.RegisterClient(ctx, client)
+	if err != nil && *update && errors.Is(err, store.ErrAlreadyExists) {
+		if updateErr := a.Registry.UpdateClient(ctx, client); updateErr != nil {
+			return exitCode(updateErr), updateErr
+		}
+		err = nil
+	}
+	if err != nil {
 		return exitCode(err), err
 	}
 	if jsonOutput {
-		a.writeJSON(map[string]any{"client_id": client.ID, "name": client.Name, "capabilities": client.Capabilities})
+		a.writeJSON(map[string]any{"client_id": client.ID, "name": client.Name, "capabilities": client.Capabilities, "role": client.Role, "work_profiles": client.WorkProfiles, "default_work_profile": client.DefaultProfile, "approval_modes": client.ApprovalModes, "default_approval_mode": client.DefaultApproval, "models": client.Models, "default_model": client.DefaultModel})
 	} else {
-		fmt.Fprintf(a.Stdout, "client_id: %s\nname: %s\n", client.ID, client.Name)
+		fmt.Fprintf(a.Stdout, "client_id: %s\nname: %s\nrole: %s\n", client.ID, client.Name, client.Role)
 	}
 	return ExitOK, nil
 }
